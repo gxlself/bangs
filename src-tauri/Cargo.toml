@@ -1,6 +1,6 @@
 [package]
 name = "bangs"
-version = "0.2.2"
+version = "0.2.3"
 description = "A dynamic notch for macOS and Windows"
 authors = ["gxlself"]
 edition = "2021"
