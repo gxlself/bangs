@@ -1,14 +1,15 @@
-//! Lyrics for whatever is playing. The active player selects a provider order;
-//! only track metadata leaves the machine, and successful results are cached
-//! on disk so a track is looked up once per source.
+//! Lyrics for whatever is playing. QQ Music and NetEase are queried together,
+//! then the most reliable timed result is selected and cached on disk.
 
-use std::collections::{hash_map::DefaultHasher, VecDeque};
+use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Mutex;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
@@ -23,7 +24,14 @@ const LYRIC_URL: &str = "https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.f
 /// Returns QRC, which carries a timing per character.
 const QRC_URL: &str = "https://c.y.qq.com/qqmusic/fcgi-bin/lyric_download.fcg";
 const REFERER: &str = "https://y.qq.com/portal/player.html";
-const TIMEOUT: Duration = Duration::from_secs(8);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(4);
+const LOOKUP_TIMEOUT: Duration = Duration::from_secs(8);
+const CACHE_VERSION: u8 = 4;
+const DAY: u64 = 24 * 60 * 60;
+const GOOD_CACHE_TTL: u64 = 30 * DAY;
+const PARTIAL_CACHE_TTL: u64 = 7 * DAY;
+const MISS_CACHE_TTL: u64 = 6 * 60 * 60;
+const ERROR_CACHE_TTL: u64 = 5 * 60;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -46,6 +54,34 @@ pub struct LyricLine {
     pub words: Vec<LyricWord>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LyricStatus {
+    #[default]
+    Idle,
+    Loading,
+    Found,
+    Uncertain,
+    NotFound,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Provider {
+    QqQrc,
+    QqLrc,
+    NeteaseYrc,
+    NeteaseLrc,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LyricSource {
+    pub original: Provider,
+    pub translation: Option<Provider>,
+    pub translation_offset: Option<f64>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Lyrics {
@@ -54,6 +90,13 @@ pub struct Lyrics {
     /// Whether the accepted lines have real timestamps.
     #[serde(default)]
     pub timed: bool,
+    #[serde(default)]
+    pub word_timed: bool,
+    #[serde(default)]
+    pub status: LyricStatus,
+    pub source: Option<LyricSource>,
+    #[serde(default)]
+    pub from_cache: bool,
     pub lines: Vec<LyricLine>,
 }
 
@@ -61,6 +104,7 @@ pub struct Lyrics {
 pub struct LyricsHub {
     current: Mutex<Lyrics>,
     requests: Mutex<Option<Sender<Request>>>,
+    generation: AtomicU64,
 }
 
 impl LyricsHub {
@@ -69,6 +113,7 @@ impl LyricsHub {
     }
 }
 
+#[derive(Clone)]
 struct Request {
     track: String,
     title: String,
@@ -76,9 +121,8 @@ struct Request {
     album: String,
     duration: Option<f64>,
     player: PlayerKind,
-    /// Whether a translated line is worth extra looking; the tray decides.
-    translate: bool,
-    attempt: u8,
+    generation: u64,
+    force: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,51 +133,57 @@ enum PlayerKind {
     Other,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Provider {
-    QqQrc,
-    QqLrc,
-    NetEase,
-}
-
 #[derive(Debug, Clone)]
 struct FetchedLyrics {
     provider: Provider,
-    timed: bool,
+    meta: SongMeta,
+    score: MatchScore,
     lines: Vec<LyricLine>,
+    translations: Vec<LyricLine>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CacheFile {
     version: u8,
-    provider: String,
-    timed: bool,
-    lines: Vec<LyricLine>,
+    created_at: u64,
+    expires_at: u64,
+    match_score: Option<i32>,
+    lyrics: Lyrics,
 }
 
-/// Search results to weigh. Wide enough that a track still turns up when the
-/// artist term misleads the ranking and its album-mates come first.
-const SEARCH_RESULTS: usize = 20;
-/// How far a result's length may sit from the one the player reports and still
-/// be taken for the same recording. Two masters of a song are a second or two
-/// apart; a cover or a live take is tens of seconds.
-const DURATION_SLACK: f64 = 10.0;
-/// Near enough to be the same master, not another take of the same song.
-const SAME_RECORDING: f64 = 3.0;
-/// How far down the results a length alone is still worth trusting. The query
-/// carried the title and the artist, so the engine put what it thinks answers
-/// them at the top; further down, a length that happens to line up is chance.
-const TRUSTED_RANK: usize = 5;
-/// Results asked for a lyric before a query is written off. One that comes
-/// back wordless is not the end of it, but the list is ordered by how likely
-/// each is to be the song, and the tail is not worth the round trips.
-const ATTEMPTS: usize = 3;
-/// Bumped whenever the matching changes enough that what an older version
-/// picked is not to be trusted — a cached file may hold a cover's timeline.
-const CACHE_VERSION: u8 = 5;
-const RETRIES: u8 = 2;
-const RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(30), Duration::from_secs(120)];
+#[derive(Debug, Clone)]
+struct SongMeta {
+    title: String,
+    artists: Vec<String>,
+    album: String,
+    duration: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Confidence {
+    Rejected,
+    Uncertain,
+    Reliable,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MatchScore {
+    total: i32,
+    confidence: Confidence,
+}
+
+#[derive(Default)]
+struct SourceBatch {
+    candidates: Vec<FetchedLyrics>,
+    responded: bool,
+}
+
+struct LookupOutcome {
+    lyrics: Lyrics,
+    match_score: Option<i32>,
+    ttl: u64,
+}
 
 /// Stable song identity; dynamic source, duration and artwork do not belong in it.
 pub fn track_key(media: &MediaState) -> String {
@@ -149,6 +199,7 @@ pub fn track_key(media: &MediaState) -> String {
 pub fn sync(app: &AppHandle, media: Option<&MediaState>) {
     let hub = app.state::<LyricsHub>();
     let Some(media) = media.filter(|media| !media.title.is_empty()) else {
+        hub.generation.fetch_add(1, Ordering::Relaxed);
         publish(app, Lyrics::default());
         return;
     };
@@ -157,34 +208,25 @@ pub fn sync(app: &AppHandle, media: Option<&MediaState>) {
     if hub.current().track == track {
         return;
     }
+    let generation = hub.generation.fetch_add(1, Ordering::Relaxed) + 1;
     // Clear immediately: the old lines belong to the previous song.
     publish(
         app,
         Lyrics {
             track: track.clone(),
-            timed: false,
-            lines: Vec::new(),
+            status: if app.state::<SettingsState>().get().lyrics_enabled {
+                LyricStatus::Loading
+            } else {
+                LyricStatus::Idle
+            },
+            ..Lyrics::default()
         },
     );
 
-    let settings = app.state::<SettingsState>().get();
-    if !settings.lyrics_enabled {
+    if !app.state::<SettingsState>().get().lyrics_enabled {
         return;
     }
-    let request = Request {
-        track,
-        title: media.title.clone(),
-        artist: media.artist.clone(),
-        album: media.album.clone(),
-        duration: media.duration,
-        player: player_kind(media),
-        translate: settings.lyrics_translation_enabled,
-        attempt: 0,
-    };
-    let sender = hub.requests.lock().unwrap().clone();
-    if let Some(sender) = sender {
-        let _ = sender.send(request);
-    }
+    send_request(app, media, track, generation, false);
 }
 
 /// Applies a change to the lyrics setting: clear the lines, or look up the
@@ -194,6 +236,59 @@ pub fn set_enabled(app: &AppHandle, enabled: bool) {
     publish(app, Lyrics::default());
     if enabled {
         sync(app, media.as_ref());
+    }
+}
+
+#[tauri::command]
+pub fn lyrics_refresh(app: AppHandle) -> Result<(), String> {
+    if !app.state::<SettingsState>().get().lyrics_enabled {
+        return Err("lyrics are disabled".into());
+    }
+    let media = app
+        .state::<crate::media::MediaHub>()
+        .current()
+        .filter(|media| !media.title.is_empty())
+        .ok_or_else(|| "nothing is playing".to_string())?;
+    let track = track_key(&media);
+    let current = app.state::<LyricsHub>().current();
+    if current.track != track {
+        sync(&app, Some(&media));
+        return Ok(());
+    }
+    if current.status == LyricStatus::Loading {
+        return Ok(());
+    }
+    let generation = app
+        .state::<LyricsHub>()
+        .generation
+        .fetch_add(1, Ordering::Relaxed)
+        + 1;
+    publish(
+        &app,
+        Lyrics {
+            status: LyricStatus::Loading,
+            ..current
+        },
+    );
+    send_request(&app, &media, track, generation, true);
+    Ok(())
+}
+
+fn send_request(app: &AppHandle, media: &MediaState, track: String, generation: u64, force: bool) {
+    let hub = app.state::<LyricsHub>();
+    let request = Request {
+        track,
+        title: media.title.clone(),
+        artist: media.artist.clone(),
+        album: media.album.clone(),
+        duration: media.duration,
+        player: player_kind(media),
+        generation,
+        force,
+    };
+    let sender = hub.requests.lock().unwrap().clone();
+    if let Some(sender) = sender {
+        let _ = sender.send(request);
     }
 }
 
@@ -225,162 +320,78 @@ fn run(app: AppHandle, requests: Receiver<Request>) {
         let _ = fs::create_dir_all(dir);
     }
 
-    let mut delayed: VecDeque<(Instant, Request)> = VecDeque::new();
-    loop {
-        if let Some((when, _)) = delayed.front() {
-            if *when <= Instant::now() {
-                let (_, request) = delayed.pop_front().expect("retry queue front");
-                if let Some(retry) = process_request(&app, request, &cache_dir) {
-                    delayed.push_back(retry);
-                    delayed.make_contiguous().sort_by_key(|(when, _)| *when);
-                }
-                continue;
-            }
-        }
-        let timeout = delayed
-            .front()
-            .map(|(when, _)| when.saturating_duration_since(Instant::now()))
-            .unwrap_or(Duration::from_secs(3600));
-        match requests.recv_timeout(timeout) {
-            Ok(first) => {
-                // Only the newest request matters; skip anything already queued behind it.
-                let request = requests.try_iter().last().unwrap_or(first);
-                if let Some(retry) = process_request(&app, request, &cache_dir) {
-                    delayed.push_back(retry);
-                    delayed.make_contiguous().sort_by_key(|(when, _)| *when);
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
-        }
+    while let Ok(first) = requests.recv() {
+        let request = requests.try_iter().last().unwrap_or(first);
+        let app = app.clone();
+        let cache_dir = cache_dir.clone();
+        thread::spawn(move || process_request(&app, request, &cache_dir));
     }
 }
 
-fn process_request(
-    app: &AppHandle,
-    request: Request,
-    cache_dir: &Option<std::path::PathBuf>,
-) -> Option<(Instant, Request)> {
-    if app.state::<LyricsHub>().current().track != request.track {
-        return None;
+fn process_request(app: &AppHandle, request: Request, cache_dir: &Option<PathBuf>) {
+    if !is_current(app, &request) {
+        return;
     }
     let path = cache_dir
         .as_ref()
         .map(|dir| dir.join(cache_name(&request.track)));
-    let fetched = path
+    let cached = path
         .as_ref()
         .and_then(|path| fs::read_to_string(path).ok())
-        .and_then(|raw| read_cache(&raw))
-        .or_else(|| {
-            let fetched = fetch(
-                &request.title,
-                &request.artist,
-                &request.album,
-                request.duration,
-                request.player,
-                request.translate,
-            );
-            if let (Some(path), Some(fetched)) = (&path, fetched.as_ref()) {
-                let cache = CacheFile {
-                    version: CACHE_VERSION,
-                    provider: fetched.provider.name().to_string(),
-                    timed: fetched.timed,
-                    lines: fetched.lines.clone(),
-                };
-                if let Ok(raw) = serde_json::to_string(&cache) {
-                    let _ = fs::write(path, raw);
-                }
+        .and_then(|raw| read_cache(&raw));
+    let now = unix_seconds();
+    if !request.force {
+        if let Some(cache) = cached.as_ref().filter(|cache| cache.expires_at > now) {
+            let mut lyrics = cache.lyrics.clone();
+            lyrics.track = request.track.clone();
+            lyrics.from_cache = true;
+            if is_current(app, &request) {
+                publish(app, lyrics);
             }
-            fetched
-        });
-
-    if let Some(fetched) = fetched {
-        if app.state::<LyricsHub>().current().track == request.track {
-            publish(
-                app,
-                Lyrics {
-                    track: request.track,
-                    timed: fetched.timed,
-                    lines: fetched.lines,
-                },
-            );
+            return;
         }
-        return None;
     }
-    if request.attempt < RETRIES {
-        let attempt = request.attempt;
-        return Some((
-            Instant::now() + RETRY_DELAYS[attempt as usize],
-            Request {
-                attempt: attempt + 1,
-                ..request
-            },
-        ));
+
+    let fallback = cached
+        .as_ref()
+        .map(|cache| cache.lyrics.clone())
+        .or_else(|| {
+            let current = app.state::<LyricsHub>().current();
+            (current.track == request.track && !current.lines.is_empty()).then_some(current)
+        });
+    let outcome = fetch_all(&request);
+    if !is_current(app, &request) {
+        return;
     }
-    if app.state::<LyricsHub>().current().track == request.track {
-        publish(
-            app,
-            Lyrics {
-                track: request.track,
-                timed: false,
-                lines: Vec::new(),
-            },
-        );
+
+    if outcome.lyrics.status != LyricStatus::Found {
+        if let Some(mut stale) = fallback.filter(|lyrics| !lyrics.lines.is_empty()) {
+            stale.track = request.track;
+            stale.status = LyricStatus::Found;
+            stale.from_cache = true;
+            publish(app, stale);
+            return;
+        }
     }
-    None
+
+    let mut lyrics = outcome.lyrics;
+    lyrics.track = request.track;
+    if let Some(path) = path {
+        write_cache(&path, &lyrics, outcome.match_score, outcome.ttl);
+    }
+    publish(app, lyrics);
+}
+
+fn is_current(app: &AppHandle, request: &Request) -> bool {
+    let hub = app.state::<LyricsHub>();
+    hub.generation.load(Ordering::Relaxed) == request.generation
+        && hub.current().track == request.track
 }
 
 fn cache_name(track: &str) -> String {
     let mut hasher = DefaultHasher::new();
     track.hash(&mut hasher);
     format!("{:016x}.json", hasher.finish())
-}
-
-/// Whether any line came with a translation under it.
-fn has_translation(lines: &[LyricLine]) -> bool {
-    lines
-        .iter()
-        .any(|line| line.translation.as_deref().is_some_and(|text| !text.trim().is_empty()))
-}
-
-/// Whether a translation would say anything this lyric does not. A lyric
-/// already written in Han characters is the one the panel reads; Hangul, kana
-/// and Latin words are what a translation is for.
-fn wants_translation(lines: &[LyricLine]) -> bool {
-    let (han, letters) = lines
-        .iter()
-        .flat_map(|line| line.text.chars())
-        .filter(|character| character.is_alphabetic())
-        .fold((0usize, 0usize), |(han, letters), character| {
-            let is_han = matches!(character, '\u{3400}'..='\u{9fff}' | '\u{f900}'..='\u{faff}');
-            (han + usize::from(is_han), letters + 1)
-        });
-    letters > 0 && han * 2 < letters
-}
-
-fn acceptable(result: &FetchedLyrics) -> bool {
-    result.timed && has_words(&result.lines)
-}
-
-/// The lines a result opens with that are not the song: who wrote it, who
-/// mixed it, or the standing sentence a catalogue returns for a track that has
-/// no words at all.
-const CREDITS: &[&str] = &[
-    "作词", "作曲", "编曲", "制作", "混音", "监制", "出品", "录音", "母带", "和声", "词：", "曲：",
-    "Written by", "Composed by", "Lyrics by", "Produced by", "Arranged by", "Mixed by",
-];
-
-/// Whether a result has anything to sing. An instrumental comes back as a
-/// single standing sentence, and a credits-only lyric says as little — both
-/// are better passed over so the next candidate, or the next provider, gets a
-/// turn.
-fn has_words(lines: &[LyricLine]) -> bool {
-    lines.iter().any(|line| {
-        let text = line.text.trim();
-        !text.is_empty()
-            && !text.contains("纯音乐")
-            && !CREDITS.iter().any(|credit| text.starts_with(credit))
-    })
 }
 
 fn has_timing(lines: &[LyricLine]) -> bool {
@@ -390,22 +401,38 @@ fn has_timing(lines: &[LyricLine]) -> bool {
             .all(|line| line.at.is_finite() && line.at >= 0.0)
 }
 
-fn read_cache(raw: &str) -> Option<FetchedLyrics> {
+fn read_cache(raw: &str) -> Option<CacheFile> {
     let cache: CacheFile = serde_json::from_str(raw).ok()?;
     if cache.version != CACHE_VERSION {
         return None;
     }
-    let result = FetchedLyrics {
-        provider: provider_from_name(&cache.provider)?,
-        timed: cache.timed,
-        lines: cache.lines,
+    Some(cache)
+}
+
+fn write_cache(path: &Path, lyrics: &Lyrics, match_score: Option<i32>, ttl: u64) {
+    let created_at = unix_seconds();
+    let cache = CacheFile {
+        version: CACHE_VERSION,
+        created_at,
+        expires_at: created_at.saturating_add(ttl),
+        match_score,
+        lyrics: lyrics.clone(),
     };
-    acceptable(&result).then_some(result)
+    if let Ok(raw) = serde_json::to_string(&cache) {
+        let _ = fs::write(path, raw);
+    }
+}
+
+fn unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 fn client() -> Option<reqwest::blocking::Client> {
     reqwest::blocking::Client::builder()
-        .timeout(TIMEOUT)
+        .timeout(REQUEST_TIMEOUT)
         .user_agent("Mozilla/5.0")
         .build()
         .ok()
@@ -443,71 +470,47 @@ fn player_kind(media: &MediaState) -> PlayerKind {
     }
 }
 
-fn provider_order(player: PlayerKind) -> &'static [Provider] {
-    match player {
-        PlayerKind::QqMusic => &[Provider::QqQrc, Provider::QqLrc, Provider::NetEase],
-        PlayerKind::NetEase => &[Provider::NetEase, Provider::QqQrc, Provider::QqLrc],
-        PlayerKind::Spotify | PlayerKind::Other => {
-            &[Provider::QqQrc, Provider::NetEase, Provider::QqLrc]
-        }
-    }
-}
-
 impl Provider {
-    fn name(self) -> &'static str {
-        match self {
-            Provider::QqQrc => "qq-qrc",
-            Provider::QqLrc => "qq-lrc",
-            Provider::NetEase => "netease",
-        }
+    fn is_qq(self) -> bool {
+        matches!(self, Provider::QqQrc | Provider::QqLrc)
     }
 }
 
-fn provider_from_name(name: &str) -> Option<Provider> {
-    match name {
-        "qq-qrc" => Some(Provider::QqQrc),
-        "qq-lrc" => Some(Provider::QqLrc),
-        "netease" => Some(Provider::NetEase),
-        _ => None,
-    }
-}
+fn fetch_all(request: &Request) -> LookupOutcome {
+    let Some(client) = client() else {
+        return missing_outcome(false);
+    };
+    let (sender, receiver) = mpsc::channel();
+    let qq_sender = sender.clone();
+    let qq_client = client.clone();
+    let qq_request = request.clone();
+    thread::spawn(move || {
+        let _ = qq_sender.send(fetch_qq_candidates(&qq_client, &qq_request));
+    });
+    let netease_client = client;
+    let netease_request = request.clone();
+    thread::spawn(move || {
+        let _ = sender.send(fetch_netease_candidates(&netease_client, &netease_request));
+    });
 
-fn fetch(
-    title: &str,
-    artist: &str,
-    album: &str,
-    duration: Option<f64>,
-    player: PlayerKind,
-    translate: bool,
-) -> Option<FetchedLyrics> {
-    let client = client()?;
-    let mut qq_cache: Option<Vec<serde_json::Value>> = None;
-    // The first source with words wins, unless a translated line was asked
-    // for and it has none: QQ carries no Chinese under a Korean lyric where
-    // NetEase does, and stopping at the first answer would never find it.
-    let mut untranslated: Option<FetchedLyrics> = None;
-    for provider in provider_order(player) {
-        let fetched = match provider {
-            Provider::QqQrc | Provider::QqLrc => {
-                let songs =
-                    qq_cache.get_or_insert_with(|| qq_songs(&client, title, artist, duration));
-                songs.iter().find_map(|song| {
-                    let fetched = match provider {
-                        Provider::QqQrc => fetch_qq_qrc_song(&client, song),
-                        _ => fetch_qq_lrc_song(&client, song),
-                    };
-                    fetched.filter(acceptable)
-                })
-            }
-            Provider::NetEase => fetch_netease(&client, title, artist, album, duration),
-        };
-        let Some(fetched) = fetched.filter(acceptable) else { continue };
-        if !translate || has_translation(&fetched.lines) || !wants_translation(&fetched.lines) {
-            return Some(fetched);
+    let deadline = Instant::now() + LOOKUP_TIMEOUT;
+    let mut batches = Vec::new();
+    while batches.len() < 2 {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
         }
-        untranslated.get_or_insert(fetched);
+        match receiver.recv_timeout(remaining) {
+            Ok(batch) => batches.push(batch),
+            Err(_) => break,
+        }
     }
-    untranslated
+    let responded = batches.iter().any(|batch| batch.responded);
+    let candidates = batches
+        .into_iter()
+        .flat_map(|batch| batch.candidates)
+        .collect::<Vec<_>>();
+    choose_result(candidates, request.player, responded)
 }
 
 /// Drops the suffixes players add to a title: "Song - Live", "Song (feat. X)".
@@ -525,43 +528,28 @@ fn plain_title(title: &str) -> String {
 
 /// The lead artist; a search does worse with the whole billing.
 fn first_artist(artist: &str) -> String {
-    let lead = artist
-        .split([',', '&', '/', ';'])
-        .next()
-        .unwrap_or(artist)
-        .trim();
+    let lead = split_artists(artist).into_iter().next().unwrap_or_default();
     if lead.is_empty() {
         artist.trim().to_string()
     } else {
-        lead.to_string()
+        lead
     }
 }
 
-/// The QQ results worth asking for a lyric, best first. More than one, because
-/// a result can turn out to carry no words and the next best deserves its turn.
-fn qq_songs(
-    client: &reqwest::blocking::Client,
-    title: &str,
-    artist: &str,
-    duration: Option<f64>,
-) -> Vec<serde_json::Value> {
-    let plain_title = plain_title(title);
-    let plain_artist = first_artist(artist);
-    // `true` where only an exact title will do; see the last query.
-    let mut queries = vec![(format!("{title} {artist}"), false)];
-    push_query(&mut queries, format!("{plain_title} {plain_artist}"), false);
-    // Apple Music hands over romanized names for part of its Chinese
-    // catalogue — 赵雷 arrives as "Lei Zhao" — and an artist the search cannot
-    // place drags the song itself out of the results, because every other
-    // track on the album matches the query just as poorly. The title alone
-    // finds it, and taking only an exact title keeps that from turning into a
-    // different song with a similar name.
-    push_query(&mut queries, plain_title.clone(), true);
-
-    for (query, exact_title) in queries {
+fn fetch_qq_candidates(client: &reqwest::blocking::Client, request: &Request) -> SourceBatch {
+    let mut batch = SourceBatch::default();
+    let plain_title = plain_title(&request.title);
+    let plain_artist = first_artist(&request.artist);
+    let mut queries = vec![format!("{} {}", request.title, request.artist)];
+    let plain = format!("{plain_title} {plain_artist}");
+    if plain != queries[0] {
+        queries.push(plain);
+    }
+    for query in queries {
+        let before = batch.candidates.len();
         let Ok(response) = client
             .get(format!(
-                "{SEARCH_URL}?w={}&format=json&n={SEARCH_RESULTS}&p=1",
+                "{SEARCH_URL}?w={}&format=json&n=20&p=1",
                 encode(&query)
             ))
             .header("Referer", REFERER)
@@ -569,6 +557,7 @@ fn qq_songs(
         else {
             continue;
         };
+        batch.responded = true;
         let Ok(body) = response.text() else { continue };
         let Ok(search) = serde_json::from_str::<serde_json::Value>(strip_jsonp(&body)) else {
             continue;
@@ -576,40 +565,54 @@ fn qq_songs(
         let Some(songs) = search["data"]["song"]["list"].as_array() else {
             continue;
         };
-        let ranked = ranked_matches(songs, &plain_title, &plain_artist, duration, exact_title);
-        if !ranked.is_empty() {
-            return ranked.into_iter().take(ATTEMPTS).cloned().collect();
+        let mut ranked = songs
+            .iter()
+            .filter_map(|song| {
+                let meta = qq_meta(song);
+                let score = match_score(request, &meta);
+                (score.confidence != Confidence::Rejected).then_some((song, meta, score))
+            })
+            .collect::<Vec<_>>();
+        ranked.sort_by_key(|(_, _, score)| std::cmp::Reverse(score.total));
+        for (song, meta, score) in ranked.into_iter().take(3) {
+            if let Some((lines, translations)) = fetch_qq_qrc_song(client, song) {
+                batch.candidates.push(FetchedLyrics {
+                    provider: Provider::QqQrc,
+                    meta: meta.clone(),
+                    score,
+                    lines,
+                    translations,
+                });
+            }
+            if let Some((lines, translations)) = fetch_qq_lrc_song(client, song) {
+                batch.candidates.push(FetchedLyrics {
+                    provider: Provider::QqLrc,
+                    meta,
+                    score,
+                    lines,
+                    translations,
+                });
+            }
+        }
+        if batch.candidates.len() > before {
+            break;
         }
     }
-    Vec::new()
-}
-
-/// Queues a query unless an earlier one already says the same thing.
-fn push_query(queries: &mut Vec<(String, bool)>, query: String, exact_title: bool) {
-    let query = query.trim().to_string();
-    if query.is_empty() || queries.iter().any(|(queued, _)| *queued == query) {
-        return;
-    }
-    queries.push((query, exact_title));
+    batch
 }
 
 fn fetch_qq_qrc_song(
     client: &reqwest::blocking::Client,
     song: &serde_json::Value,
-) -> Option<FetchedLyrics> {
+) -> Option<(Vec<LyricLine>, Vec<LyricLine>)> {
     let id = song["songid"].as_i64()?;
-    let lines = fetch_qrc(client, id)?;
-    Some(FetchedLyrics {
-        provider: Provider::QqQrc,
-        timed: has_timing(&lines),
-        lines,
-    })
+    fetch_qrc(client, id)
 }
 
 fn fetch_qq_lrc_song(
     client: &reqwest::blocking::Client,
     song: &serde_json::Value,
-) -> Option<FetchedLyrics> {
+) -> Option<(Vec<LyricLine>, Vec<LyricLine>)> {
     let song_mid = song["songmid"].as_str()?.to_string();
     if song_mid.is_empty() {
         return None;
@@ -623,133 +626,92 @@ fn fetch_qq_lrc_song(
         };
         let lines = parse_lrc(payload["lyric"].as_str().unwrap_or_default());
         if !lines.is_empty() {
-            return Some(FetchedLyrics {
-                provider: Provider::QqLrc,
-                timed: has_timing(&lines),
-                lines: with_translation(
-                    lines,
-                    parse_lrc(payload["trans"].as_str().unwrap_or_default()),
-                ),
-            });
+            return Some((
+                lines,
+                parse_lrc(payload["trans"].as_str().unwrap_or_default()),
+            ));
         }
     }
     None
 }
 
-fn fetch_netease(
-    client: &reqwest::blocking::Client,
-    title: &str,
-    artist: &str,
-    album: &str,
-    duration: Option<f64>,
-) -> Option<FetchedLyrics> {
-    let query = format!("{} {}", plain_title(title), first_artist(artist));
-    let search = client
+fn fetch_netease_candidates(client: &reqwest::blocking::Client, request: &Request) -> SourceBatch {
+    let mut batch = SourceBatch::default();
+    let query = format!(
+        "{} {}",
+        plain_title(&request.title),
+        first_artist(&request.artist)
+    );
+    let Ok(response) = client
         .get(format!(
             "https://music.163.com/api/search/get/web?s={}&type=1&offset=0&total=true&limit=10",
             encode(&query)
         ))
         .header("Referer", "https://music.163.com/")
         .send()
-        .ok()?
-        .text()
-        .ok()?;
-    let search: serde_json::Value = serde_json::from_str(&search).ok()?;
-    let songs = search["result"]["songs"].as_array()?;
-    let song = best_netease_match(songs, title, artist, album, duration)?;
-    let id = song["id"].as_i64()?;
-    let body = client
-        .get(format!(
-            "https://music.163.com/api/song/lyric?id={id}&lv=1&kv=1&tv=-1"
-        ))
-        .header("Referer", "https://music.163.com/")
-        .send()
-        .ok()?
-        .text()
-        .ok()?;
-    let payload: serde_json::Value = serde_json::from_str(&body).ok()?;
-
-    let lines = if let Some(yrc) = payload["yrc"]["lyric"].as_str() {
-        let lines = parse_yrc(yrc);
-        if lines.is_empty() {
-            parse_lrc(payload["lrc"]["lyric"].as_str().unwrap_or_default())
-        } else {
-            lines
-        }
-    } else {
-        parse_lrc(payload["lrc"]["lyric"].as_str().unwrap_or_default())
+    else {
+        return batch;
     };
-    if lines.is_empty() {
-        return None;
-    }
-    Some(FetchedLyrics {
-        provider: Provider::NetEase,
-        timed: has_timing(&lines),
-        lines: with_translation(
-            lines,
-            parse_lrc(payload["tlyric"]["lyric"].as_str().unwrap_or_default()),
-        ),
-    })
-}
-
-fn best_netease_match<'a>(
-    songs: &'a [serde_json::Value],
-    title: &str,
-    artist: &str,
-    album: &str,
-    duration: Option<f64>,
-) -> Option<&'a serde_json::Value> {
-    let wanted_title = normalize(&plain_title(title));
-    let wanted_artist = normalize(&first_artist(artist));
-    let wanted_album = normalize(album);
-    songs
+    batch.responded = true;
+    let Ok(body) = response.text() else {
+        return batch;
+    };
+    let Ok(search) = serde_json::from_str::<serde_json::Value>(&body) else {
+        return batch;
+    };
+    let Some(songs) = search["result"]["songs"].as_array() else {
+        return batch;
+    };
+    let mut ranked = songs
         .iter()
-        .filter(|song| {
-            let name = normalize(song["name"].as_str().unwrap_or_default());
-            name == wanted_title || name.contains(&wanted_title) || wanted_title.contains(&name)
+        .filter_map(|song| {
+            let meta = netease_meta(song);
+            let score = match_score(request, &meta);
+            (score.confidence != Confidence::Rejected).then_some((song, meta, score))
         })
-        .max_by_key(|song| {
-            let name = normalize(song["name"].as_str().unwrap_or_default());
-            let artists = song["artists"]
-                .as_array()
-                .map(|items| {
-                    items
-                        .iter()
-                        .filter_map(|item| item["name"].as_str())
-                        .map(normalize)
-                        .collect::<Vec<_>>()
-                        .join("/")
-                })
-                .unwrap_or_default();
-            let album_name = normalize(song["album"]["name"].as_str().unwrap_or_default());
-            let mut score = if name == wanted_title {
-                4
-            } else if name.contains(&wanted_title) || wanted_title.contains(&name) {
-                2
-            } else {
-                0
-            };
-            if !wanted_artist.is_empty()
-                && (artists.contains(&wanted_artist) || wanted_artist.contains(&artists))
-            {
-                score += 3;
-            }
-            if !wanted_album.is_empty()
-                && (album_name == wanted_album
-                    || album_name.contains(&wanted_album)
-                    || wanted_album.contains(&album_name))
-            {
-                score += 1;
-            }
-            if let (Some(wanted), Some(actual)) =
-                (duration, song["duration"].as_f64().map(|ms| ms / 1000.0))
-            {
-                if (wanted - actual).abs() < 3.0 {
-                    score += 1;
-                }
-            }
-            score
-        })
+        .collect::<Vec<_>>();
+    ranked.sort_by_key(|(_, _, score)| std::cmp::Reverse(score.total));
+    for (song, meta, score) in ranked.into_iter().take(3) {
+        let Some(id) = song["id"].as_i64() else {
+            continue;
+        };
+        let Ok(response) = client
+            .get(format!(
+                "https://music.163.com/api/song/lyric?id={id}&lv=1&kv=1&tv=-1"
+            ))
+            .header("Referer", "https://music.163.com/")
+            .send()
+        else {
+            continue;
+        };
+        let Ok(body) = response.text() else { continue };
+        let Ok(payload) = serde_json::from_str::<serde_json::Value>(&body) else {
+            continue;
+        };
+        let yrc = payload["yrc"]["lyric"]
+            .as_str()
+            .map(parse_yrc)
+            .unwrap_or_default();
+        let (provider, lines) = if yrc.is_empty() {
+            (
+                Provider::NeteaseLrc,
+                parse_lrc(payload["lrc"]["lyric"].as_str().unwrap_or_default()),
+            )
+        } else {
+            (Provider::NeteaseYrc, yrc)
+        };
+        if lines.is_empty() {
+            continue;
+        }
+        batch.candidates.push(FetchedLyrics {
+            provider,
+            meta,
+            score,
+            lines,
+            translations: parse_lrc(payload["tlyric"]["lyric"].as_str().unwrap_or_default()),
+        });
+    }
+    batch
 }
 
 fn lyric_payload(client: &reqwest::blocking::Client, song_mid: &str) -> Option<serde_json::Value> {
@@ -766,111 +728,429 @@ fn lyric_payload(client: &reqwest::blocking::Client, song_mid: &str) -> Option<s
     serde_json::from_str(strip_jsonp(&raw)).ok()
 }
 
-/// Titles and names are compared folded: catalogues disagree about traditional
-/// and simplified characters — Apple Music says 當時的月亮 where QQ Music says
-/// 当时的月亮 — and about spacing and case.
 fn normalize(value: &str) -> String {
     crate::platform::to_simplified(value)
         .chars()
-        .filter(|c| !c.is_whitespace())
+        .filter(|c| c.is_alphanumeric())
         .collect::<String>()
         .to_lowercase()
 }
 
-/// The results that could be this song, best first: an exact title by the same
-/// artist, running the length the player reports. The search endpoint
-/// otherwise happily puts covers and remixes above the recording itself.
-fn ranked_matches<'a>(
-    songs: &'a [serde_json::Value],
-    title: &str,
-    artist: &str,
-    duration: Option<f64>,
-    exact_title: bool,
-) -> Vec<&'a serde_json::Value> {
-    let wanted_title = normalize(title);
-    let wanted_artist = normalize(artist);
+fn split_artists(artist: &str) -> Vec<String> {
+    let replaced = artist
+        .to_lowercase()
+        .replace(" feat. ", "/")
+        .replace(" feat ", "/")
+        .replace(" featuring ", "/")
+        .replace(" x ", "/");
+    replaced
+        .split([',', '，', '&', '/', ';', '；', '、', '×'])
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(str::to_string)
+        .collect()
+}
 
-    let score = |song: &serde_json::Value| {
-        let name = normalize(song["songname"].as_str().unwrap_or_default());
-        let singers = song["singer"]
+const VERSION_TAGS: [&str; 7] = [
+    "live",
+    "remix",
+    "acoustic",
+    "instrumental",
+    "remaster",
+    "伴奏",
+    "现场",
+];
+
+fn version_tags(title: &str) -> HashSet<&'static str> {
+    let lower = title.to_lowercase();
+    VERSION_TAGS
+        .iter()
+        .copied()
+        .filter(|tag| lower.contains(tag))
+        .collect()
+}
+
+fn qq_meta(song: &serde_json::Value) -> SongMeta {
+    SongMeta {
+        title: song["songname"].as_str().unwrap_or_default().to_string(),
+        artists: song["singer"]
             .as_array()
-            .map(|singers| {
-                singers
+            .map(|items| {
+                items
                     .iter()
-                    .map(|singer| normalize(singer["name"].as_str().unwrap_or_default()))
-                    .collect::<Vec<_>>()
-                    .join("/")
+                    .filter_map(|item| item["name"].as_str().map(str::to_string))
+                    .collect()
             })
-            .unwrap_or_default();
-        let title_score = if name == wanted_title {
-            2
-        } else if name.contains(&wanted_title) || wanted_title.contains(&name) {
-            1
-        } else {
-            0
-        };
-        let artist_score = if wanted_artist.is_empty() {
-            0
-        } else if singers.contains(&wanted_artist) || wanted_artist.contains(&singers) {
-            2
-        } else {
-            0
-        };
-        (title_score, artist_score)
-    };
-
-    // How far this recording is from the one playing, when both lengths are
-    // known. An unknown one is worth nothing and loses to any known match.
-    let gap = |song: &serde_json::Value| match (duration, song["interval"].as_f64()) {
-        (Some(wanted), Some(interval)) if wanted > 0.0 && interval > 0.0 => {
-            Some((interval - wanted).abs())
-        }
-        _ => None,
-    };
-
-    let mut matches: Vec<(&serde_json::Value, i32, f64, usize)> = Vec::new();
-    for (rank, song) in songs.iter().enumerate() {
-        let (title_score, artist_score) = score(song);
-        // A recording of a different length is a different recording. A cover
-        // carries the same words on a timeline of its own, which reads as
-        // lyrics that drift — worse than no lyrics at all.
-        let gap = gap(song);
-        if gap.is_some_and(|gap| gap > DURATION_SLACK) {
-            continue;
-        }
-        let length_score = match gap {
-            Some(gap) if gap <= SAME_RECORDING => 2,
-            Some(_) => 1,
-            None => 0,
-        };
-        // Catalogues translate: Apple Music calls 西湖 "West Lake" and 痛仰乐队
-        // "Miserable Faith", and neither word survives to be compared. The
-        // search understood the query anyway — it answered with the song — so
-        // a result it ranked at the top, running the length that is playing,
-        // is taken on the engine's word. A title-only query gets no such
-        // benefit: there the title is all that was asked.
-        let vouched = !exact_title && rank < TRUSTED_RANK && length_score == 2;
-        if (title_score == 0 && !vouched) || (exact_title && title_score < 2) {
-            continue;
-        }
-        matches.push((
-            song,
-            title_score + artist_score + length_score,
-            gap.unwrap_or(f64::MAX),
-            rank,
-        ));
+            .unwrap_or_default(),
+        album: song["albumname"].as_str().unwrap_or_default().to_string(),
+        duration: song["interval"].as_f64(),
     }
-    // Score first, then the length closest to what is playing; where neither
-    // separates two results, the order the endpoint returned them in stands.
-    matches.sort_by(|left, right| {
-        right.1.cmp(&left.1).then(left.2.total_cmp(&right.2)).then(left.3.cmp(&right.3))
-    });
-    matches.into_iter().map(|(song, ..)| song).collect()
+}
+
+fn netease_meta(song: &serde_json::Value) -> SongMeta {
+    SongMeta {
+        title: song["name"].as_str().unwrap_or_default().to_string(),
+        artists: song["artists"]
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item["name"].as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        album: song["album"]["name"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+        duration: song["duration"]
+            .as_f64()
+            .map(|milliseconds| milliseconds / 1000.0),
+    }
+}
+
+fn match_score(request: &Request, candidate: &SongMeta) -> MatchScore {
+    let wanted_title = normalize(&request.title);
+    let actual_title = normalize(&candidate.title);
+    let wanted_base = normalize(&plain_title(&request.title));
+    let actual_base = normalize(&plain_title(&candidate.title));
+    let title = if !wanted_title.is_empty() && wanted_title == actual_title {
+        50
+    } else if !wanted_base.is_empty() && wanted_base == actual_base {
+        42
+    } else if !wanted_base.is_empty()
+        && !actual_base.is_empty()
+        && (wanted_base.contains(&actual_base) || actual_base.contains(&wanted_base))
+    {
+        25
+    } else {
+        0
+    };
+
+    let wanted_artists = split_artists(&request.artist)
+        .into_iter()
+        .map(|artist| normalize(&artist))
+        .filter(|artist| !artist.is_empty())
+        .collect::<Vec<_>>();
+    let actual_artists = candidate
+        .artists
+        .iter()
+        .map(|artist| normalize(artist))
+        .filter(|artist| !artist.is_empty())
+        .collect::<Vec<_>>();
+    let artist = if wanted_artists
+        .iter()
+        .any(|wanted| actual_artists.contains(wanted))
+    {
+        25
+    } else if wanted_artists.iter().any(|wanted| {
+        actual_artists
+            .iter()
+            .any(|actual| wanted.contains(actual) || actual.contains(wanted))
+    }) {
+        15
+    } else {
+        0
+    };
+
+    let wanted_album = normalize(&request.album);
+    let actual_album = normalize(&candidate.album);
+    let album = if !wanted_album.is_empty() && wanted_album == actual_album {
+        10
+    } else if !wanted_album.is_empty()
+        && !actual_album.is_empty()
+        && (wanted_album.contains(&actual_album) || actual_album.contains(&wanted_album))
+    {
+        5
+    } else {
+        0
+    };
+    let duration = match (request.duration, candidate.duration) {
+        (Some(wanted), Some(actual)) if (wanted - actual).abs() <= 3.0 => 10,
+        (Some(wanted), Some(actual)) if (wanted - actual).abs() <= 8.0 => 5,
+        _ => 0,
+    };
+    let wanted_versions = version_tags(&request.title);
+    let actual_versions = version_tags(&candidate.title);
+    let version = if wanted_versions == actual_versions {
+        5
+    } else if wanted_versions != actual_versions
+        && (!wanted_versions.is_empty() || !actual_versions.is_empty())
+    {
+        -20
+    } else {
+        0
+    };
+    let total = (title + artist + album + duration + version).clamp(0, 100);
+    let artist_required = !wanted_artists.is_empty();
+    let reliable = total >= 75
+        && title >= 42
+        && if artist_required {
+            artist > 0
+        } else {
+            album > 0 && duration > 0
+        };
+    let confidence = if reliable {
+        Confidence::Reliable
+    } else if total >= 50 && title >= 25 {
+        Confidence::Uncertain
+    } else {
+        Confidence::Rejected
+    };
+    MatchScore { total, confidence }
+}
+
+#[derive(Clone)]
+struct AlignedTranslation {
+    lines: Vec<LyricLine>,
+    provider: Provider,
+    offset: f64,
+    matched: usize,
+}
+
+fn choose_result(
+    candidates: Vec<FetchedLyrics>,
+    player: PlayerKind,
+    responded: bool,
+) -> LookupOutcome {
+    let uncertain = candidates
+        .iter()
+        .filter(|candidate| candidate.score.confidence == Confidence::Uncertain)
+        .max_by_key(|candidate| candidate.score.total);
+    let reliable = candidates
+        .iter()
+        .filter(|candidate| {
+            candidate.score.confidence == Confidence::Reliable && has_timing(&candidate.lines)
+        })
+        .collect::<Vec<_>>();
+    if reliable.is_empty() {
+        if let Some(candidate) = uncertain {
+            return LookupOutcome {
+                lyrics: Lyrics {
+                    status: LyricStatus::Uncertain,
+                    source: Some(LyricSource {
+                        original: candidate.provider,
+                        translation: None,
+                        translation_offset: None,
+                    }),
+                    ..Lyrics::default()
+                },
+                match_score: Some(candidate.score.total),
+                ttl: MISS_CACHE_TTL,
+            };
+        }
+        return missing_outcome(responded);
+    }
+
+    let mut selected: Option<(
+        FetchedLyrics,
+        Option<AlignedTranslation>,
+        (i32, usize, usize, i32, usize),
+    )> = None;
+    for original in &reliable {
+        let best_translation = reliable
+            .iter()
+            .filter(|translation| {
+                !translation.translations.is_empty()
+                    && same_recording(&original.meta, &translation.meta)
+            })
+            .filter_map(|translation| {
+                align_translation(&original.lines, &translation.translations).map(
+                    |(lines, offset, matched)| AlignedTranslation {
+                        lines,
+                        provider: translation.provider,
+                        offset,
+                        matched,
+                    },
+                )
+            })
+            .max_by_key(|translation| translation.matched);
+        let word_rows = original
+            .lines
+            .iter()
+            .filter(|line| !line.words.is_empty())
+            .count();
+        let translated_rows = best_translation
+            .as_ref()
+            .map(|translation| translation.matched)
+            .unwrap_or_default();
+        let word_coverage = word_rows * 1000 / original.lines.len().max(1);
+        let translation_coverage = translated_rows * 1000 / original.lines.len().max(1);
+        let affinity = source_affinity(player, original.provider);
+        let key = (
+            original.score.total,
+            word_coverage,
+            translation_coverage,
+            affinity,
+            original.lines.len(),
+        );
+        if selected
+            .as_ref()
+            .is_none_or(|(_, _, current_key)| key > *current_key)
+        {
+            selected = Some(((*original).clone(), best_translation, key));
+        }
+    }
+
+    let (selected, translation, _) = selected.expect("reliable candidates are not empty");
+    let mut lines = selected.lines;
+    let (translation_provider, translation_offset, translated) = if let Some(aligned) = translation
+    {
+        lines = aligned.lines;
+        (
+            Some(aligned.provider),
+            Some(aligned.offset),
+            aligned.matched,
+        )
+    } else {
+        (None, None, 0)
+    };
+    let word_timed = lines.iter().any(|line| !line.words.is_empty());
+    let high_translation_coverage = !lines.is_empty() && translated * 10 >= lines.len() * 7;
+    LookupOutcome {
+        lyrics: Lyrics {
+            timed: true,
+            word_timed,
+            status: LyricStatus::Found,
+            source: Some(LyricSource {
+                original: selected.provider,
+                translation: translation_provider,
+                translation_offset,
+            }),
+            from_cache: false,
+            lines,
+            ..Lyrics::default()
+        },
+        match_score: Some(selected.score.total),
+        ttl: if word_timed && high_translation_coverage {
+            GOOD_CACHE_TTL
+        } else {
+            PARTIAL_CACHE_TTL
+        },
+    }
+}
+
+fn missing_outcome(responded: bool) -> LookupOutcome {
+    LookupOutcome {
+        lyrics: Lyrics {
+            status: LyricStatus::NotFound,
+            ..Lyrics::default()
+        },
+        match_score: None,
+        ttl: if responded {
+            MISS_CACHE_TTL
+        } else {
+            ERROR_CACHE_TTL
+        },
+    }
+}
+
+fn source_affinity(player: PlayerKind, provider: Provider) -> i32 {
+    match player {
+        PlayerKind::QqMusic if provider.is_qq() => 1,
+        PlayerKind::NetEase if !provider.is_qq() => 1,
+        _ => 0,
+    }
+}
+
+fn same_recording(left: &SongMeta, right: &SongMeta) -> bool {
+    if normalize(&plain_title(&left.title)) != normalize(&plain_title(&right.title)) {
+        return false;
+    }
+    let left_artists = left
+        .artists
+        .iter()
+        .map(|artist| normalize(artist))
+        .collect::<HashSet<_>>();
+    let right_artists = right
+        .artists
+        .iter()
+        .map(|artist| normalize(artist))
+        .collect::<HashSet<_>>();
+    let artist_matches = !left_artists.is_disjoint(&right_artists);
+    let album_matches =
+        !normalize(&left.album).is_empty() && normalize(&left.album) == normalize(&right.album);
+    let duration_matches = match (left.duration, right.duration) {
+        (Some(left), Some(right)) => (left - right).abs() <= 8.0,
+        _ => false,
+    };
+    artist_matches || (album_matches && duration_matches)
+}
+
+/// Finds one global offset, then pairs translation rows monotonically. This
+/// tolerates providers shifting an otherwise identical translation timeline.
+fn align_translation(
+    originals: &[LyricLine],
+    translations: &[LyricLine],
+) -> Option<(Vec<LyricLine>, f64, usize)> {
+    let available = originals.len().min(translations.len());
+    if available == 0 {
+        return None;
+    }
+    let mut buckets: HashMap<i32, usize> = HashMap::new();
+    for original in originals {
+        for translation in translations {
+            let delta = original.at - translation.at;
+            if delta.abs() <= 5.0 {
+                *buckets.entry((delta * 20.0).round() as i32).or_default() += 1;
+            }
+        }
+    }
+    let mut offsets = buckets.into_iter().collect::<Vec<_>>();
+    offsets.sort_by_key(|(bucket, votes)| (std::cmp::Reverse(*votes), bucket.abs()));
+
+    let mut best: Option<(Vec<LyricLine>, f64, usize)> = None;
+    for (bucket, _) in offsets {
+        let offset = bucket as f64 / 20.0;
+        let (lines, matched) = pair_translation(originals, translations, offset);
+        if best.as_ref().is_none_or(|(_, best_offset, best_matched)| {
+            matched > *best_matched
+                || (matched == *best_matched && offset.abs() < best_offset.abs())
+        }) {
+            best = Some((lines, offset, matched));
+        }
+    }
+    let (lines, offset, matched) = best?;
+    let enough_rows = matched >= available.min(5);
+    let enough_coverage = matched * 10 >= available * 7;
+    (enough_rows && enough_coverage).then_some((lines, offset, matched))
+}
+
+fn pair_translation(
+    originals: &[LyricLine],
+    translations: &[LyricLine],
+    offset: f64,
+) -> (Vec<LyricLine>, usize) {
+    let mut lines = originals.to_vec();
+    let mut translation_index = 0;
+    let mut matched = 0;
+    for line in &mut lines {
+        while translation_index < translations.len()
+            && translations[translation_index].at + offset < line.at - 0.2
+        {
+            translation_index += 1;
+        }
+        let Some(translation) = translations.get(translation_index) else {
+            break;
+        };
+        if (translation.at + offset - line.at).abs() <= 0.2 {
+            let text = translation.text.trim();
+            if !text.is_empty() && text != line.text.trim() {
+                line.translation = Some(text.to_string());
+                matched += 1;
+            }
+            translation_index += 1;
+        }
+    }
+    (lines, matched)
 }
 
 /// Downloads the QRC document and turns it into timed lines. The response is
 /// XML whose CDATA sections hold the encrypted lyric and its translation.
-fn fetch_qrc(client: &reqwest::blocking::Client, song_id: i64) -> Option<Vec<LyricLine>> {
+fn fetch_qrc(
+    client: &reqwest::blocking::Client,
+    song_id: i64,
+) -> Option<(Vec<LyricLine>, Vec<LyricLine>)> {
     let document = client
         .get(format!(
             "{QRC_URL}?version=15&miniversion=82&lrctype=4&musicid={song_id}"
@@ -898,7 +1178,7 @@ fn fetch_qrc(client: &reqwest::blocking::Client, song_id: i64) -> Option<Vec<Lyr
         .and_then(|block| qrc::decrypt_lyrics(block))
         .map(|text| parse_translation(&text))
         .unwrap_or_default();
-    Some(with_translation(lines, translations))
+    Some((lines, translations))
 }
 
 /// The lyric lives in the `LyricContent` attribute of the QRC document.
@@ -1152,148 +1432,9 @@ fn parse_stamp(stamp: &str) -> Option<f64> {
     Some(minutes * 60.0 + seconds)
 }
 
-/// Pairs each line with the translation carrying the same timestamp.
-fn with_translation(mut lines: Vec<LyricLine>, translations: Vec<LyricLine>) -> Vec<LyricLine> {
-    for line in &mut lines {
-        line.translation = translations
-            .iter()
-            .find(|translation| (translation.at - line.at).abs() < 0.05)
-            .map(|translation| translation.text.trim().to_string())
-            .filter(|text| !text.is_empty() && *text != line.text.trim());
-    }
-    lines
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn song(name: &str, singers: &[&str]) -> serde_json::Value {
-        serde_json::json!({
-            "songname": name,
-            "singer": singers.iter().map(|name| serde_json::json!({ "name": name })).collect::<Vec<_>>(),
-        })
-    }
-
-    fn song_of(name: &str, singers: &[&str], interval: i64) -> serde_json::Value {
-        let mut song = song(name, singers);
-        song["interval"] = serde_json::json!(interval);
-        song
-    }
-
-    fn pick<'a>(songs: &'a [serde_json::Value], title: &str, artist: &str, exact: bool) -> Option<&'a str> {
-        ranked_matches(songs, title, artist, None, exact)
-            .first()
-            .map(|song| song["songname"].as_str().unwrap())
-    }
-
-    fn pick_lasting<'a>(
-        songs: &'a [serde_json::Value],
-        title: &str,
-        artist: &str,
-        duration: f64,
-    ) -> Option<&'a str> {
-        ranked_matches(songs, title, artist, Some(duration), false)
-            .first()
-            .map(|song| song["songname"].as_str().unwrap())
-    }
-
-    #[test]
-    fn keeps_the_best_ranked_of_equally_good_matches() {
-        // A duet scores exactly like the original, and the endpoint put the
-        // original first.
-        let songs = [song("无法长大", &["赵雷"]), song("无法长大", &["张大为", "赵雷"])];
-        let ranked = ranked_matches(&songs, "无法长大", "赵雷", None, false);
-        assert!(std::ptr::eq(ranked[0], &songs[0]));
-    }
-
-    #[test]
-    fn ignores_other_songs_by_the_same_artist() {
-        let songs = [song("鼓楼", &["赵雷"]), song("无法长大", &["赵雷"])];
-        assert_eq!(pick(&songs, "无法长大", "赵雷", false), Some("无法长大"));
-    }
-
-    #[test]
-    fn finds_the_track_when_the_artist_arrives_romanized() {
-        // Apple Music says "Lei Zhao"; QQ Music says 赵雷. Only the title lines up.
-        let songs = [song("鼓楼", &["赵雷"]), song("无法长大", &["赵雷"])];
-        assert_eq!(pick(&songs, "无法长大", "Lei Zhao", true), Some("无法长大"));
-    }
-
-    #[test]
-    fn a_title_only_search_turns_down_an_inexact_title() {
-        let songs = [song("无法长大 (DJ 阿若版)", &["赵雷"])];
-        assert_eq!(pick(&songs, "无法长大", "Lei Zhao", true), None);
-        assert_eq!(pick(&songs, "无法长大", "Lei Zhao", false), Some("无法长大 (DJ 阿若版)"));
-    }
-
-    #[test]
-    fn reads_past_traditional_characters() {
-        // Apple Music hands over 當時的月亮; QQ Music lists 当时的月亮.
-        let songs = [song("当时的月亮", &["王菲"])];
-        assert_eq!(pick(&songs, "當時的月亮", "Faye Wong", true), Some("当时的月亮"));
-    }
-
-    #[test]
-    fn turns_down_a_cover_of_the_right_length_elsewhere() {
-        // 小宇: the cover the search ranks first runs 269s, the recording
-        // playing runs 228s, and their words sit on different timelines.
-        let songs = [song_of("小宇", &["蓝心羽"], 269), song_of("小宇", &["张震岳"], 227)];
-        assert_eq!(pick_lasting(&songs, "小宇", "A-Yue Chang", 228.0), Some("小宇"));
-        let ranked = ranked_matches(&songs, "小宇", "A-Yue Chang", Some(228.0), false);
-        assert!(std::ptr::eq(ranked[0], &songs[1]));
-    }
-
-    #[test]
-    fn takes_a_top_result_of_the_right_length_on_the_search_s_word() {
-        // West Lake by Miserable Faith is 西湖 by 痛仰乐队; not a word matches.
-        let songs = [song_of("西湖", &["痛仰乐队"], 253), song_of("West Lake", &["K3CIM"], 125)];
-        assert_eq!(pick_lasting(&songs, "West Lake", "Miserable Faith", 251.0), Some("西湖"));
-    }
-
-    #[test]
-    fn keeps_a_result_whose_length_is_unknown() {
-        let songs = [song("小宇", &["张震岳"])];
-        assert_eq!(pick_lasting(&songs, "小宇", "A-Yue Chang", 228.0), Some("小宇"));
-    }
-
-    #[test]
-    fn hears_nothing_in_a_placeholder() {
-        let line = |text: &str| LyricLine {
-            at: 0.0,
-            text: text.to_string(),
-            translation: None,
-            words: Vec::new(),
-        };
-        assert!(!has_words(&[line("此歌曲为没有填词的纯音乐，请您欣赏")]));
-        assert!(!has_words(&[line("作词：K3CIM"), line("编曲：K3CIM")]));
-        assert!(has_words(&[line("作词：林夕"), line("当时桌上有一杯茶")]));
-    }
-
-    #[test]
-    fn asks_for_a_translation_only_where_one_would_say_something() {
-        let line = |text: &str, translation: Option<&str>| LyricLine {
-            at: 0.0,
-            text: text.to_string(),
-            translation: translation.map(str::to_string),
-            words: Vec::new(),
-        };
-        // A Chinese lyric is the one the panel reads; nothing to add.
-        assert!(!wants_translation(&[line("当时桌上有一杯茶", None)]));
-        assert!(wants_translation(&[line("처음 본 널 기억해", None)]));
-        assert!(wants_translation(&[line("We are, we are", None)]));
-        assert!(!has_translation(&[line("Darling", Some("  "))]));
-        assert!(has_translation(&[line("Darling", Some("亲爱的"))]));
-    }
-
-    #[test]
-    fn queues_each_query_once() {
-        let mut queries = vec![("Song Artist".to_string(), false)];
-        push_query(&mut queries, "Song Artist".to_string(), false);
-        push_query(&mut queries, "Song ".to_string(), true);
-        push_query(&mut queries, "Song".to_string(), true);
-        assert_eq!(queries, [("Song Artist".to_string(), false), ("Song".to_string(), true)]);
-    }
 
     fn media(source_id: &str, app_name: &str) -> MediaState {
         MediaState {
@@ -1310,24 +1451,69 @@ mod tests {
         }
     }
 
-    #[test]
-    fn provider_order_follows_player() {
-        assert_eq!(
-            provider_order(PlayerKind::QqMusic),
-            &[Provider::QqQrc, Provider::QqLrc, Provider::NetEase]
-        );
-        assert_eq!(
-            provider_order(PlayerKind::NetEase),
-            &[Provider::NetEase, Provider::QqQrc, Provider::QqLrc]
-        );
-        assert_eq!(
-            provider_order(PlayerKind::Spotify),
-            &[Provider::QqQrc, Provider::NetEase, Provider::QqLrc]
-        );
-        assert_eq!(
-            provider_order(PlayerKind::Other),
-            provider_order(PlayerKind::Spotify)
-        );
+    fn request(title: &str, artist: &str, album: &str, duration: Option<f64>) -> Request {
+        Request {
+            track: "track".into(),
+            title: title.into(),
+            artist: artist.into(),
+            album: album.into(),
+            duration,
+            player: PlayerKind::Other,
+            generation: 1,
+            force: false,
+        }
+    }
+
+    fn meta(title: &str, artist: &str, album: &str, duration: Option<f64>) -> SongMeta {
+        SongMeta {
+            title: title.into(),
+            artists: (!artist.is_empty())
+                .then(|| artist.into())
+                .into_iter()
+                .collect(),
+            album: album.into(),
+            duration,
+        }
+    }
+
+    fn lines(prefix: &str, count: usize, offset: f64) -> Vec<LyricLine> {
+        (0..count)
+            .map(|index| LyricLine {
+                at: index as f64 * 2.0 + offset,
+                text: format!("{prefix}{index}"),
+                translation: None,
+                words: Vec::new(),
+            })
+            .collect()
+    }
+
+    fn candidate(
+        provider: Provider,
+        score: i32,
+        confidence: Confidence,
+        word_timed: bool,
+        translations: Vec<LyricLine>,
+    ) -> FetchedLyrics {
+        let mut lyric_lines = lines("line", 10, 0.0);
+        if word_timed {
+            for line in &mut lyric_lines {
+                line.words.push(LyricWord {
+                    at: line.at,
+                    duration: 1.0,
+                    text: line.text.clone(),
+                });
+            }
+        }
+        FetchedLyrics {
+            provider,
+            meta: meta("Song", "Artist", "Album", Some(180.0)),
+            score: MatchScore {
+                total: score,
+                confidence,
+            },
+            lines: lyric_lines,
+            translations,
+        }
     }
 
     #[test]
@@ -1347,12 +1533,37 @@ mod tests {
     }
 
     #[test]
-    fn parses_lrc_and_translation() {
-        let lines = parse_lrc("[00:01.50]first\n[00:03.00]second");
-        let translated = with_translation(lines, parse_lrc("[00:01.50]第一句"));
-        assert_eq!(translated.len(), 2);
-        assert!((translated[0].at - 1.5).abs() < f64::EPSILON);
-        assert_eq!(translated[0].translation.as_deref(), Some("第一句"));
+    fn exact_metadata_is_reliable_and_title_only_is_uncertain() {
+        let exact = match_score(
+            &request("Song", "Artist", "Album", Some(180.0)),
+            &meta("Song", "Artist", "Album", Some(181.0)),
+        );
+        assert_eq!(exact.confidence, Confidence::Reliable);
+        assert!(exact.total >= 75);
+
+        let title_only = match_score(
+            &request("Song", "", "", None),
+            &meta("Song", "Other", "Other", None),
+        );
+        assert_eq!(title_only.confidence, Confidence::Uncertain);
+    }
+
+    #[test]
+    fn missing_artist_requires_album_and_duration() {
+        let score = match_score(
+            &request("Song", "", "Album", Some(180.0)),
+            &meta("Song", "Artist", "Album", Some(181.0)),
+        );
+        assert_eq!(score.confidence, Confidence::Reliable);
+    }
+
+    #[test]
+    fn conflicting_versions_are_not_reliable() {
+        let score = match_score(
+            &request("Song - Live", "Artist", "Album", Some(180.0)),
+            &meta("Song - Remix", "Artist", "Album", Some(180.0)),
+        );
+        assert_eq!(score.confidence, Confidence::Uncertain);
     }
 
     #[test]
@@ -1377,30 +1588,25 @@ mod tests {
     }
 
     #[test]
-    fn accepts_timed_results_without_translation() {
-        let mut lines = parse_lrc("[00:01.00]hello\n[00:02.00]world");
-        assert!(acceptable(&FetchedLyrics {
-            provider: Provider::QqLrc,
-            timed: has_timing(&lines),
-            lines: lines.clone(),
-        }));
-        lines[0].translation = Some("你好".into());
-        assert!(acceptable(&FetchedLyrics {
-            provider: Provider::QqLrc,
-            timed: true,
-            lines
-        }));
+    fn aligns_positive_and_negative_translation_offsets() {
+        let original = lines("line", 8, 0.0);
+        let translated = lines("译", 8, 1.2);
+        let (_, offset, matched) = align_translation(&original, &translated).unwrap();
+        assert!((offset + 1.2).abs() <= 0.05);
+        assert_eq!(matched, 8);
+
+        let early = lines("译", 8, -0.8);
+        let (_, offset, matched) = align_translation(&original, &early).unwrap();
+        assert!((offset - 0.8).abs() <= 0.05);
+        assert_eq!(matched, 8);
     }
 
     #[test]
-    fn translation_pairing_ignores_mismatched_timestamps() {
-        let lines = with_translation(parse_lrc("[00:01.00]hello"), parse_lrc("[00:03.00]你好"));
-        assert!(lines[0].translation.is_none());
-        assert!(acceptable(&FetchedLyrics {
-            provider: Provider::QqLrc,
-            timed: true,
-            lines
-        }));
+    fn rejects_translation_with_low_timeline_coverage() {
+        let original = lines("line", 10, 0.0);
+        let mut translated = lines("译", 3, 0.0);
+        translated.extend(lines("wrong", 7, 100.0));
+        assert!(align_translation(&original, &translated).is_none());
     }
 
     #[test]
@@ -1408,17 +1614,112 @@ mod tests {
         let lines = parse_qrc(r#"<LyricContent="[1000,1000]Hello(1200,800)"/>"#);
         let translations =
             parse_translation(r#"<LyricContent="[1000,1000]你好（朋友）(1000,1000)"/>"#);
-        let lines = with_translation(lines, translations);
+        let (lines, _, _) = align_translation(&lines, &translations).unwrap();
         assert_eq!(lines[0].translation.as_deref(), Some("你好（朋友）"));
     }
 
     #[test]
-    fn netease_match_uses_millisecond_duration_and_filters_titles_first() {
-        let songs = vec![
-            serde_json::json!({ "name": "Wrong", "duration": 251253, "artists": [{"name":"Artist"}], "album": {"name":"Album"} }),
-            serde_json::json!({ "name": "Song", "duration": 251253, "artists": [{"name":"Artist"}], "album": {"name":"Album"} }),
-        ];
-        let matched = best_netease_match(&songs, "Song", "Artist", "Album", Some(251.0)).unwrap();
-        assert_eq!(matched["name"].as_str(), Some("Song"));
+    fn selection_prefers_match_then_word_timing_then_translation() {
+        let translation = lines("译", 10, 1.0);
+        let lower_match = candidate(
+            Provider::NeteaseYrc,
+            80,
+            Confidence::Reliable,
+            true,
+            translation.clone(),
+        );
+        let higher_match = candidate(Provider::QqLrc, 90, Confidence::Reliable, false, Vec::new());
+        let outcome = choose_result(vec![lower_match, higher_match], PlayerKind::Other, true);
+        assert_eq!(outcome.lyrics.source.unwrap().original, Provider::QqLrc);
+
+        let plain = candidate(Provider::QqLrc, 90, Confidence::Reliable, false, Vec::new());
+        let timed = candidate(
+            Provider::NeteaseYrc,
+            90,
+            Confidence::Reliable,
+            true,
+            translation,
+        );
+        let outcome = choose_result(vec![plain, timed], PlayerKind::Other, true);
+        assert_eq!(
+            outcome.lyrics.source.unwrap().original,
+            Provider::NeteaseYrc
+        );
+        assert!(outcome.lyrics.word_timed);
+    }
+
+    #[test]
+    fn cross_source_translation_is_reported_and_extends_cache_ttl() {
+        let original = candidate(Provider::QqQrc, 90, Confidence::Reliable, true, Vec::new());
+        let translation = candidate(
+            Provider::NeteaseLrc,
+            90,
+            Confidence::Reliable,
+            false,
+            lines("译", 10, 1.0),
+        );
+        let outcome = choose_result(vec![original, translation], PlayerKind::Other, true);
+        let source = outcome.lyrics.source.unwrap();
+        assert_eq!(source.original, Provider::QqQrc);
+        assert_eq!(source.translation, Some(Provider::NeteaseLrc));
+        assert_eq!(outcome.ttl, GOOD_CACHE_TTL);
+    }
+
+    #[test]
+    fn player_source_breaks_equal_quality_ties() {
+        let qq = candidate(Provider::QqQrc, 90, Confidence::Reliable, true, Vec::new());
+        let netease = candidate(
+            Provider::NeteaseYrc,
+            90,
+            Confidence::Reliable,
+            true,
+            Vec::new(),
+        );
+        let outcome = choose_result(vec![qq, netease], PlayerKind::NetEase, true);
+        assert_eq!(
+            outcome.lyrics.source.unwrap().original,
+            Provider::NeteaseYrc
+        );
+    }
+
+    #[test]
+    fn uncertain_result_never_exposes_lines() {
+        let outcome = choose_result(
+            vec![candidate(
+                Provider::QqLrc,
+                60,
+                Confidence::Uncertain,
+                false,
+                Vec::new(),
+            )],
+            PlayerKind::Other,
+            true,
+        );
+        assert_eq!(outcome.lyrics.status, LyricStatus::Uncertain);
+        assert!(outcome.lyrics.lines.is_empty());
+        assert_eq!(outcome.ttl, MISS_CACHE_TTL);
+    }
+
+    #[test]
+    fn cache_v4_round_trips_and_v3_is_rejected() {
+        let cache = CacheFile {
+            version: CACHE_VERSION,
+            created_at: 10,
+            expires_at: 20,
+            match_score: Some(90),
+            lyrics: Lyrics {
+                status: LyricStatus::Found,
+                ..Lyrics::default()
+            },
+        };
+        let raw = serde_json::to_string(&cache).unwrap();
+        assert_eq!(read_cache(&raw).unwrap().expires_at, 20);
+        let old = raw.replace("\"version\":4", "\"version\":3");
+        assert!(read_cache(&old).is_none());
+        assert_eq!(
+            serde_json::to_string(&Provider::NeteaseYrc).unwrap(),
+            "\"netease-yrc\""
+        );
+        assert_eq!(missing_outcome(false).ttl, ERROR_CACHE_TTL);
     }
 }

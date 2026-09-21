@@ -2,21 +2,22 @@ import { useMemo, type MouseEvent } from "react";
 
 import { clock } from "../lib/format";
 import { t } from "../lib/i18n";
-import type { LyricLine } from "../lib/native";
+import { native, type LyricLine, type LyricProvider } from "../lib/native";
 import { useNow } from "../lib/useNow";
 import { lineAt, useLyrics } from "../store/lyrics";
 import { elapsedAt, isMediaLive, useMedia } from "../store/media";
 import { useNotch } from "../store/notch";
 import { Empty } from "./Empty";
 import { KaraokeLine } from "./KaraokeLine";
-import { MusicIcon, NextIcon, PauseIcon, PlayIcon, PreviousIcon } from "./Icons";
+import { MusicIcon, NextIcon, PauseIcon, PlayIcon, PreviousIcon, RefreshIcon } from "./Icons";
 
 export function MusicPanel() {
   const current = useMedia((s) => s.media);
   const lastActiveAt = useMedia((s) => s.lastActiveAt);
   const mediaClock = useMedia((s) => s.clock);
   const send = useMedia((s) => s.send);
-  const lines = useLyrics((s) => s.lines);
+  const lyrics = useLyrics();
+  const lines = lyrics.lines;
   const showTranslations = useNotch((s) => s.settings.lyricsTranslationEnabled);
   // The sweep over the current line needs a faster clock than the progress bar.
   const now = useNow(current?.playing ? (lines.length ? 80 : 250) : 1000, !!current, true);
@@ -55,7 +56,11 @@ export function MusicPanel() {
           {!hasLyrics && <div className="music__artist">{media.artist || media.album || " "}</div>}
         </div>
 
-        {hasLyrics && <LyricView lines={lines} elapsed={elapsed ?? 0} showTranslations={showTranslations} />}
+        {hasLyrics ? (
+          <LyricView lines={lines} elapsed={elapsed ?? 0} showTranslations={showTranslations} />
+        ) : (
+          <div className="lyrics lyrics--status">{statusLabel(lyrics.status)}</div>
+        )}
 
         {progress != null && elapsed != null && duration ? (
           <div className="progress" onClick={seek}>
@@ -72,9 +77,22 @@ export function MusicPanel() {
         )}
 
         <div className="music__footer">
-          <span className="music__app">
-            {hasLyrics && media.artist ? `${media.artist} · ${media.appName}` : media.appName}
-          </span>
+          <div className="music__meta">
+            <span className="music__app">
+              {hasLyrics && media.artist ? `${media.artist} · ${media.appName}` : media.appName}
+            </span>
+            <span className="lyrics__source" title={sourceLabel(lyrics)}>
+              {sourceLabel(lyrics)}
+            </span>
+            <button
+              className={`lyrics__refresh${lyrics.status === "loading" ? " is-loading" : ""}`}
+              onClick={() => void native.refreshLyrics().catch((error) => console.warn("lyric refresh failed", error))}
+              disabled={lyrics.status === "loading"}
+              title={t("刷新歌词", "Refresh lyrics")}
+            >
+              <RefreshIcon width={12} height={12} />
+            </button>
+          </div>
           <div className="controls">
             <button className="control" onClick={() => send({ action: "previous" })} title={t("上一首", "Previous")}>
               <PreviousIcon width={18} height={18} />
@@ -90,6 +108,37 @@ export function MusicPanel() {
       </div>
     </div>
   );
+}
+
+function statusLabel(status: ReturnType<typeof useLyrics.getState>["status"]) {
+  switch (status) {
+    case "loading":
+      return t("正在查找歌词…", "Looking for lyrics…");
+    case "uncertain":
+      return t("歌词匹配不确定", "Lyric match is uncertain");
+    case "notFound":
+      return t("未找到歌词", "No lyrics found");
+    default:
+      return "";
+  }
+}
+
+function providerLabel(provider: LyricProvider) {
+  return provider.startsWith("qq-") ? t("QQ 音乐", "QQ Music") : t("网易云", "NetEase");
+}
+
+function sourceLabel(lyrics: ReturnType<typeof useLyrics.getState>) {
+  if (!lyrics.source) return "";
+  let label = providerLabel(lyrics.source.original);
+  if (lyrics.wordTimed) label += t(" · 逐字", " · word-timed");
+  if (lyrics.source.translation) {
+    const translation = providerLabel(lyrics.source.translation);
+    label += translation === providerLabel(lyrics.source.original)
+      ? t(" · 翻译", " · translation")
+      : t(` + ${translation}翻译`, ` + ${translation} translation`);
+  }
+  if (lyrics.fromCache) label += t(" · 缓存", " · cached");
+  return label;
 }
 
 /** Height of one lyric row; translations add a second row when enabled. */

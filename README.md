@@ -69,10 +69,10 @@ version check depend on, and the one command that stores the notarization creden
 hardened runtime needs `src-tauri/entitlements.plist`, whose Apple Events entitlement is what keeps
 the Spotify panel working in a notarized build.
 
-Lyrics use a player-aware public-provider fallback chain built from QQ Music and NetEase. A result is
-accepted when it contains timed original lyrics; matched translations are shown when available and can
-be hidden independently. Only track metadata is sent, successful results are cached under the app cache
-directory, and the tray menu can turn the lookup off entirely.
+Lyrics query QQ Music and NetEase concurrently, rank candidates by title, artist, album, duration and
+version, then prefer word-timed results with well-aligned translations. Reliable translations can be
+merged across providers after a global timeline offset is verified. Only track metadata is sent; results
+use expiring on-disk caches, can be refreshed from the music panel, and the tray menu can turn lookup off.
 
 The clipboard panel asks Paste for its panel with `open pasteg://panel`, which Paste answers in
 `AppDelegate.application(_:open:)`; older Paste builds only get activated instead.

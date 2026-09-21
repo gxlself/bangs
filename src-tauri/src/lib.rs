@@ -151,6 +151,7 @@ pub fn run() {
             set_cursor,
             capture_keyboard,
             media_command,
+            lyrics::lyrics_refresh,
             dev::open_project,
             activities::activity_open,
             clipboard::clipboard_use,

@@ -67,11 +67,25 @@ export interface LyricLine {
   words?: LyricWord[];
 }
 
+export type LyricStatus = "idle" | "loading" | "found" | "uncertain" | "notFound";
+export type LyricProvider = "qq-qrc" | "qq-lrc" | "netease-yrc" | "netease-lrc";
+
+export interface LyricSource {
+  original: LyricProvider;
+  translation: LyricProvider | null;
+  translationOffset: number | null;
+}
+
 export interface Lyrics {
   /** The track these lines belong to. */
   track: string;
   /** True when the accepted result has timed lyrics. */
   timed: boolean;
+  /** True when at least part of the result has per-word timing. */
+  wordTimed: boolean;
+  status: LyricStatus;
+  source: LyricSource | null;
+  fromCache: boolean;
   lines: LyricLine[];
 }
 
@@ -180,6 +194,7 @@ export const native = {
   /** Only while a field in the panel is focused; see src/components/TodoPanel.tsx. */
   captureKeyboard: (capture: boolean) => invoke<void>("capture_keyboard", { capture }),
   media: (command: MediaCommand) => invoke<void>("media_command", { command }),
+  refreshLyrics: () => invoke<void>("lyrics_refresh"),
   openProject: (path: string, editor?: string) => invoke<void>("open_project", { path, editor }),
   clipboardUse: (id: number) => invoke<void>("clipboard_use", { id }),
   clipboardOpen: () => invoke<void>("clipboard_open"),

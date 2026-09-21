@@ -9,9 +9,13 @@ interface LyricsStore extends Lyrics {
 export const useLyrics = create<LyricsStore>((set) => ({
   track: "",
   timed: false,
+  wordTimed: false,
+  status: "idle",
+  source: null,
+  fromCache: false,
   lines: [],
   update(next) {
-    set({ track: next.track, timed: next.timed, lines: next.lines });
+    set(next);
   },
 }));
 

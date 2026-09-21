@@ -132,6 +132,13 @@ export const BoardIcon = (props: IconProps) => (
   </Stroke>
 );
 
+export const RefreshIcon = (props: IconProps) => (
+  <Stroke {...props}>
+    <path d="M20 7v5h-5" />
+    <path d="M19 12a7 7 0 1 0-1.8 4.7" />
+  </Stroke>
+);
+
 /** The glyphs a plugin may name; anything else falls back to a dot. */
 const GLYPHS: Record<string, ComponentType<IconProps>> = {
   board: BoardIcon,
