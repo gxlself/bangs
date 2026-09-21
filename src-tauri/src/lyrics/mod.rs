@@ -26,7 +26,7 @@ const QRC_URL: &str = "https://c.y.qq.com/qqmusic/fcgi-bin/lyric_download.fcg";
 const REFERER: &str = "https://y.qq.com/portal/player.html";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(4);
 const LOOKUP_TIMEOUT: Duration = Duration::from_secs(8);
-const CACHE_VERSION: u8 = 4;
+const CACHE_VERSION: u8 = 6;
 const DAY: u64 = 24 * 60 * 60;
 const GOOD_CACHE_TTL: u64 = 30 * DAY;
 const PARTIAL_CACHE_TTL: u64 = 7 * DAY;
@@ -158,6 +158,10 @@ struct SongMeta {
     artists: Vec<String>,
     album: String,
     duration: Option<f64>,
+    /// Where the search put it. The engine understood the query even where
+    /// none of the words survive a comparison, so its own first answer is
+    /// worth something.
+    rank: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -394,6 +398,26 @@ fn cache_name(track: &str) -> String {
     format!("{:016x}.json", hasher.finish())
 }
 
+/// The lines a result opens with that are not the song: who wrote it, who
+/// mixed it, or the standing sentence a catalogue returns for a track that
+/// has no words at all.
+const CREDITS: &[&str] = &[
+    "作词", "作曲", "编曲", "制作", "混音", "监制", "出品", "录音", "母带", "和声", "词：", "曲：",
+    "Written by", "Composed by", "Lyrics by", "Produced by", "Arranged by", "Mixed by",
+];
+
+/// Whether a result has anything to sing. An instrumental comes back as a
+/// single standing sentence, and a credits-only lyric says as little — both
+/// are better passed over so the next candidate gets a turn.
+fn has_words(lines: &[LyricLine]) -> bool {
+    lines.iter().any(|line| {
+        let text = line.text.trim();
+        !text.is_empty()
+            && !text.contains("纯音乐")
+            && !CREDITS.iter().any(|credit| text.starts_with(credit))
+    })
+}
+
 fn has_timing(lines: &[LyricLine]) -> bool {
     !lines.is_empty()
         && lines
@@ -567,13 +591,19 @@ fn fetch_qq_candidates(client: &reqwest::blocking::Client, request: &Request) ->
         };
         let mut ranked = songs
             .iter()
-            .filter_map(|song| {
-                let meta = qq_meta(song);
+            .enumerate()
+            .filter_map(|(rank, song)| {
+                let meta = qq_meta(song, rank);
                 let score = match_score(request, &meta);
                 (score.confidence != Confidence::Rejected).then_some((song, meta, score))
             })
             .collect::<Vec<_>>();
-        ranked.sort_by_key(|(_, _, score)| std::cmp::Reverse(score.total));
+        // Confidence first: a candidate carried by its length and the search's
+    // own ranking scores few points, and would otherwise be sorted out by
+    // whatever merely shares a word with the title.
+    ranked.sort_by_key(|(_, _, score)| {
+        (std::cmp::Reverse(score.confidence), std::cmp::Reverse(score.total))
+    });
         for (song, meta, score) in ranked.into_iter().take(3) {
             if let Some((lines, translations)) = fetch_qq_qrc_song(client, song) {
                 batch.candidates.push(FetchedLyrics {
@@ -664,13 +694,19 @@ fn fetch_netease_candidates(client: &reqwest::blocking::Client, request: &Reques
     };
     let mut ranked = songs
         .iter()
-        .filter_map(|song| {
-            let meta = netease_meta(song);
+        .enumerate()
+        .filter_map(|(rank, song)| {
+            let meta = netease_meta(song, rank);
             let score = match_score(request, &meta);
             (score.confidence != Confidence::Rejected).then_some((song, meta, score))
         })
         .collect::<Vec<_>>();
-    ranked.sort_by_key(|(_, _, score)| std::cmp::Reverse(score.total));
+    // Confidence first: a candidate carried by its length and the search's
+    // own ranking scores few points, and would otherwise be sorted out by
+    // whatever merely shares a word with the title.
+    ranked.sort_by_key(|(_, _, score)| {
+        (std::cmp::Reverse(score.confidence), std::cmp::Reverse(score.total))
+    });
     for (song, meta, score) in ranked.into_iter().take(3) {
         let Some(id) = song["id"].as_i64() else {
             continue;
@@ -770,8 +806,9 @@ fn version_tags(title: &str) -> HashSet<&'static str> {
         .collect()
 }
 
-fn qq_meta(song: &serde_json::Value) -> SongMeta {
+fn qq_meta(song: &serde_json::Value, rank: usize) -> SongMeta {
     SongMeta {
+        rank,
         title: song["songname"].as_str().unwrap_or_default().to_string(),
         artists: song["singer"]
             .as_array()
@@ -787,8 +824,9 @@ fn qq_meta(song: &serde_json::Value) -> SongMeta {
     }
 }
 
-fn netease_meta(song: &serde_json::Value) -> SongMeta {
+fn netease_meta(song: &serde_json::Value, rank: usize) -> SongMeta {
     SongMeta {
+        rank,
         title: song["name"].as_str().unwrap_or_default().to_string(),
         artists: song["artists"]
             .as_array()
@@ -818,9 +856,15 @@ fn match_score(request: &Request, candidate: &SongMeta) -> MatchScore {
         50
     } else if !wanted_base.is_empty() && wanted_base == actual_base {
         42
+    } else if !wanted_base.is_empty() && !actual_base.is_empty() && actual_base.contains(&wanted_base)
+    {
+        // The catalogue lists both names: 「你不知道的事 | All The Things You
+        // Never Knew」 carries the title whole, which says it is the song
+        // even when it says nothing about the recording.
+        35
     } else if !wanted_base.is_empty()
         && !actual_base.is_empty()
-        && (wanted_base.contains(&actual_base) || actual_base.contains(&wanted_base))
+        && wanted_base.contains(&actual_base)
     {
         25
     } else {
@@ -882,17 +926,29 @@ fn match_score(request: &Request, candidate: &SongMeta) -> MatchScore {
         0
     };
     let total = (title + artist + album + duration + version).clamp(0, 100);
-    let artist_required = !wanted_artists.is_empty();
-    let reliable = total >= 75
-        && title >= 42
-        && if artist_required {
-            artist > 0
-        } else {
-            album > 0 && duration > 0
-        };
+    // Apple Music hands over romanized and translated names for much of its
+    // Chinese and Korean catalogue — 赵雷 arrives as "A-Yue Chang", 王菲 as
+    // "Faye Wong", 《西湖》 as "West Lake" — and an artist that cannot be
+    // placed is no evidence against a candidate. A length that matches to the
+    // second stands in for it: a cover or a live take is tens of seconds away.
+    let same_title = title >= 42;
+    let same_length = duration >= 10;
+    // Where even the title was translated there is nothing left to compare,
+    // and what is left is the engine's own first answer, running the length
+    // that is playing.
+    let vouched = candidate.rank == 0 && same_length;
+    // A take tagged differently — Live against Remix — is a different take
+    // however well its length lines up.
+    let same_version = version >= 0;
+    let reliable = same_version
+        && ((same_title && (artist > 0 || same_length)) || (total >= 75 && same_title) || vouched);
+    // The song, if not this recording of it: the name matches, or enough else
+    // does. Those lines are worth showing with a word of warning; nothing at
+    // all is the worse answer.
+    let same_song = title >= 35;
     let confidence = if reliable {
         Confidence::Reliable
-    } else if total >= 50 && title >= 25 {
+    } else if same_song || (total >= 50 && title >= 25) {
         Confidence::Uncertain
     } else {
         Confidence::Rejected
@@ -915,28 +971,40 @@ fn choose_result(
 ) -> LookupOutcome {
     let uncertain = candidates
         .iter()
-        .filter(|candidate| candidate.score.confidence == Confidence::Uncertain)
+        .filter(|candidate| {
+            candidate.score.confidence == Confidence::Uncertain
+                && has_timing(&candidate.lines)
+                && has_words(&candidate.lines)
+        })
         .max_by_key(|candidate| candidate.score.total);
     let reliable = candidates
         .iter()
         .filter(|candidate| {
-            candidate.score.confidence == Confidence::Reliable && has_timing(&candidate.lines)
+            candidate.score.confidence == Confidence::Reliable
+                && has_timing(&candidate.lines)
+                && has_words(&candidate.lines)
         })
         .collect::<Vec<_>>();
     if reliable.is_empty() {
         if let Some(candidate) = uncertain {
+            // Words that might be the wrong recording still beat no words at
+            // all; the panel says they are uncertain, and a better answer
+            // replaces them as soon as one turns up.
             return LookupOutcome {
                 lyrics: Lyrics {
                     status: LyricStatus::Uncertain,
+                    timed: has_timing(&candidate.lines),
+                    word_timed: candidate.lines.iter().any(|line| !line.words.is_empty()),
                     source: Some(LyricSource {
                         original: candidate.provider,
                         translation: None,
                         translation_offset: None,
                     }),
+                    lines: candidate.lines.clone(),
                     ..Lyrics::default()
                 },
                 match_score: Some(candidate.score.total),
-                ttl: MISS_CACHE_TTL,
+                ttl: PARTIAL_CACHE_TTL,
             };
         }
         return missing_outcome(responded);
@@ -1465,6 +1533,18 @@ mod tests {
     }
 
     fn meta(title: &str, artist: &str, album: &str, duration: Option<f64>) -> SongMeta {
+        ranked_meta(title, artist, album, duration, 3)
+    }
+
+    /// Where the search put it matters now; rank 3 is "somewhere in the list"
+    /// for the tests that do not care.
+    fn ranked_meta(
+        title: &str,
+        artist: &str,
+        album: &str,
+        duration: Option<f64>,
+        rank: usize,
+    ) -> SongMeta {
         SongMeta {
             title: title.into(),
             artists: (!artist.is_empty())
@@ -1473,6 +1553,7 @@ mod tests {
                 .collect(),
             album: album.into(),
             duration,
+            rank,
         }
     }
 
@@ -1553,6 +1634,52 @@ mod tests {
         let score = match_score(
             &request("Song", "", "Album", Some(180.0)),
             &meta("Song", "Artist", "Album", Some(181.0)),
+        );
+        assert_eq!(score.confidence, Confidence::Reliable);
+    }
+
+    #[test]
+    fn a_romanized_artist_does_not_sink_the_recording() {
+        // Apple Music calls 赵雷 "A-Yue Chang"; the catalogue does not.
+        let score = match_score(
+            &request("小宇", "A-Yue Chang", "OK", Some(228.0)),
+            &ranked_meta("小宇", "张震岳", "OK", Some(227.0), 6),
+        );
+        assert_eq!(score.confidence, Confidence::Reliable);
+    }
+
+    #[test]
+    fn a_cover_of_the_right_name_and_the_wrong_length_is_not_reliable() {
+        // The same words on a timeline of its own: 269s against the 228s
+        // recording that is playing.
+        let score = match_score(
+            &request("小宇", "A-Yue Chang", "OK", Some(228.0)),
+            &ranked_meta("小宇", "蓝心羽", "小宇", Some(269.0), 0),
+        );
+        assert_ne!(score.confidence, Confidence::Reliable);
+    }
+
+    #[test]
+    fn a_translated_name_rides_on_the_search_s_own_answer() {
+        // 西湖 arrives as "West Lake" and 痛仰乐队 as "Miserable Faith": not a
+        // word survives, so the engine's own first answer is what is left.
+        let score = match_score(
+            &request("West Lake", "Miserable Faith", "The Music", Some(251.1)),
+            &ranked_meta("西湖", "痛仰乐队", "不要停止我的音乐", Some(253.0), 0),
+        );
+        assert_eq!(score.confidence, Confidence::Reliable);
+        let further_down = match_score(
+            &request("West Lake", "Miserable Faith", "The Music", Some(251.1)),
+            &ranked_meta("西湖", "痛仰乐队", "不要停止我的音乐", Some(253.0), 4),
+        );
+        assert_ne!(further_down.confidence, Confidence::Reliable);
+    }
+
+    #[test]
+    fn traditional_and_simplified_are_the_same_title() {
+        let score = match_score(
+            &request("當時的月亮", "Faye Wong", "只愛陌生人", Some(268.0)),
+            &ranked_meta("当时的月亮", "王菲", "只爱陌生人", Some(268.5), 1),
         );
         assert_eq!(score.confidence, Confidence::Reliable);
     }
@@ -1683,7 +1810,7 @@ mod tests {
     }
 
     #[test]
-    fn uncertain_result_never_exposes_lines() {
+    fn uncertain_result_shows_its_lines_and_says_so() {
         let outcome = choose_result(
             vec![candidate(
                 Provider::QqLrc,
@@ -1695,13 +1822,25 @@ mod tests {
             PlayerKind::Other,
             true,
         );
+        // Words that might be the wrong recording still beat no words at all.
         assert_eq!(outcome.lyrics.status, LyricStatus::Uncertain);
-        assert!(outcome.lyrics.lines.is_empty());
-        assert_eq!(outcome.ttl, MISS_CACHE_TTL);
+        assert_eq!(outcome.lyrics.lines.len(), 10);
+        assert_eq!(outcome.ttl, PARTIAL_CACHE_TTL);
     }
 
     #[test]
-    fn cache_v4_round_trips_and_v3_is_rejected() {
+    fn a_result_with_nothing_to_sing_is_not_a_result() {
+        let mut wordless = candidate(Provider::QqLrc, 90, Confidence::Reliable, false, Vec::new());
+        for line in &mut wordless.lines {
+            line.text = "此歌曲为没有填词的纯音乐，请您欣赏".into();
+        }
+        let outcome = choose_result(vec![wordless], PlayerKind::Other, true);
+        assert_eq!(outcome.lyrics.status, LyricStatus::NotFound);
+        assert!(outcome.lyrics.lines.is_empty());
+    }
+
+    #[test]
+    fn the_cache_round_trips_and_an_older_version_is_rejected() {
         let cache = CacheFile {
             version: CACHE_VERSION,
             created_at: 10,
@@ -1714,7 +1853,10 @@ mod tests {
         };
         let raw = serde_json::to_string(&cache).unwrap();
         assert_eq!(read_cache(&raw).unwrap().expires_at, 20);
-        let old = raw.replace("\"version\":4", "\"version\":3");
+        let old = raw.replace(
+            &format!("\"version\":{CACHE_VERSION}"),
+            &format!("\"version\":{}", CACHE_VERSION - 1),
+        );
         assert!(read_cache(&old).is_none());
         assert_eq!(
             serde_json::to_string(&Provider::NeteaseYrc).unwrap(),
