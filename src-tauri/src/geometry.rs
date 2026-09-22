@@ -324,6 +324,11 @@ pub fn spawn_cursor_tracker(app: AppHandle) {
                     let _ = app.emit("bangs://outside-click", ());
                 }
             }
+            // WKWebView now and then loses a release; a tab being dragged
+            // along the bar listens here so it never stays stuck to the pointer.
+            if was_down && !down {
+                let _ = app.emit("bangs://release", ());
+            }
             #[cfg(windows)]
             if !down {
                 press_began_outside = false;

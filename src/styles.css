@@ -429,6 +429,30 @@ button:disabled,
   transition: background 0.2s, color 0.2s;
 }
 
+/* Dragging a tab along the bar; see TabBar.tsx. The others step aside, and
+   the dropped one glides into its slot for SETTLE_MS. */
+.tabs.is-reordering,
+.tabs.is-reordering .tab {
+  cursor: grabbing;
+}
+
+.tabs.is-reordering .tab {
+  transition: background 0.2s, color 0.2s, transform 0.18s var(--ease-out);
+}
+
+.tabs.is-reordering .tab.is-dragging {
+  position: relative;
+  z-index: 1;
+  background: var(--fill-strong);
+  color: var(--text);
+  /* Follows the pointer without lagging behind it. */
+  transition: background 0.2s, color 0.2s;
+}
+
+.tabs.is-settling .tab.is-dragging {
+  transition: background 0.2s, color 0.2s, transform 0.18s var(--ease-out);
+}
+
 .tab[data-hover],
 .icon-button[data-hover] {
   background: var(--fill);

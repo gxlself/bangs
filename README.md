@@ -23,6 +23,8 @@ wants "Run anyway" once.
   the field is focused. Click a line when it is done and it comes apart and blows off the list;
   nothing is kept. A new line waits beside the collapsed notch for a few minutes unless something
   is playing.
+- **Tabs**: drag a tab along the bar to put the panels in the order you use them; the order is
+  kept across restarts. A tab that only shows up sometimes, like the board, keeps its place.
 - **Board**: anything else on the machine can dock a row — a title, a subtitle, a progress bar and
   at most a link — by writing a JSON file, or by posting to a loopback endpoint. The newest row
   shows beside the collapsed notch. See [docs/plugins.md](docs/plugins.md).

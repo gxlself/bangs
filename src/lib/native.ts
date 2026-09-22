@@ -23,6 +23,8 @@ export interface Settings {
   display: string | null;
   /** "zh" or "en"; null follows the system language. */
   language: string | null;
+  /** Tab ids in the order the user dragged them into; empty keeps the default. */
+  tabOrder: string[];
 }
 
 export interface MediaState {
@@ -190,9 +192,10 @@ export const native = {
   ready: () => invoke<void>("notch_ready"),
   setHitRect: (width: number, height: number) => invoke<void>("set_hit_rect", { width, height }),
   /** The webview cannot set the cursor itself here; see src/lib/hover.ts. */
-  setCursor: (shape: "default" | "pointer" | "grab" | "text") => invoke<void>("set_cursor", { shape }),
+  setCursor: (shape: "default" | "pointer" | "grab" | "grabbing" | "text") => invoke<void>("set_cursor", { shape }),
   /** Only while a field in the panel is focused; see src/components/TodoPanel.tsx. */
   captureKeyboard: (capture: boolean) => invoke<void>("capture_keyboard", { capture }),
+  setTabOrder: (order: string[]) => invoke<void>("set_tab_order", { order }),
   media: (command: MediaCommand) => invoke<void>("media_command", { command }),
   refreshLyrics: () => invoke<void>("lyrics_refresh"),
   openProject: (path: string, editor?: string) => invoke<void>("open_project", { path, editor }),
@@ -218,6 +221,8 @@ export const events = {
   pointer: (handler: (point: [number, number]) => void) =>
     listen<[number, number]>("bangs://pointer", (event) => handler(event.payload)),
   outsideClick: (handler: () => void) => listen("bangs://outside-click", () => handler()),
+  /** The mouse button went up, wherever it was; see TabBar.tsx. */
+  release: (handler: () => void) => listen("bangs://release", () => handler()),
   language: (handler: (language: string) => void) =>
     listen<string>("bangs://language", (event) => handler(event.payload)),
   /** Windows only: drops the notch caught itself (see platform/win_drop.rs). */

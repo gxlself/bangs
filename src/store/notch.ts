@@ -1,13 +1,26 @@
 import { create } from "zustand";
 
 import type { Mode } from "../lib/layout";
-import type { Bootstrap, ScreenInfo, Settings } from "../lib/native";
+import { native, type Bootstrap, type ScreenInfo, type Settings } from "../lib/native";
 import { hasFreshActivity, useActivities } from "./activities";
 import { waitingSessions, useDev } from "./dev";
 import { isMediaLive, useMedia } from "./media";
 import { useTodos } from "./todos";
 
 export type Section = "music" | "shelf" | "dev" | "paste" | "board" | "todo";
+
+/** The panel's tabs in their default order. */
+export const SECTIONS: readonly Section[] = ["music", "shelf", "dev", "paste", "todo", "board"];
+
+/**
+ * Every section in the order the user dragged the tabs into. Sections the
+ * saved order does not name, such as one added by a later version, follow in
+ * their default order.
+ */
+export function orderedSections(order: readonly string[]): Section[] {
+  const known = SECTIONS.filter((id) => order.includes(id)).sort((a, b) => order.indexOf(a) - order.indexOf(b));
+  return [...known, ...SECTIONS.filter((id) => !known.includes(id))];
+}
 
 const COLLAPSE_DELAY_MS = 450;
 const DROP_LEAVE_DELAY_MS = 150;
@@ -25,6 +38,8 @@ interface NotchStore {
   hovering: boolean;
   /** A shelf file is being dragged out; keep the panel open until it lands. */
   draggingOut: boolean;
+  /** A tab is being dragged along the bar; keep the panel open until it drops. */
+  reordering: boolean;
   successText: string;
 
   init(boot: Bootstrap): void;
@@ -38,6 +53,9 @@ interface NotchStore {
   dragLeft(): void;
   dropped(message: string): void;
   setDraggingOut(dragging: boolean): void;
+  setReordering(reordering: boolean): void;
+  /** Takes the tabs on show in their new order and remembers it. */
+  reorderTabs(visible: Section[]): void;
 }
 
 let collapseTimer: number | undefined;
@@ -62,14 +80,14 @@ export const useNotch = create<NotchStore>((set, get) => {
   const scheduleCollapse = () => {
     window.clearTimeout(collapseTimer);
     collapseTimer = window.setTimeout(() => {
-      const { mode, hovering, pinned, draggingOut } = get();
+      const { mode, hovering, pinned, draggingOut, reordering } = get();
       // A half-typed to-do is not something to close out from under the user;
       // ask again in a moment rather than dropping the timer altogether.
       if (useTodos.getState().typing) {
         scheduleCollapse();
         return;
       }
-      if (mode === "expanded" && !hovering && !pinned && !draggingOut) get().collapse();
+      if (mode === "expanded" && !hovering && !pinned && !draggingOut && !reordering) get().collapse();
     }, COLLAPSE_DELAY_MS);
   };
 
@@ -100,6 +118,7 @@ export const useNotch = create<NotchStore>((set, get) => {
       clipboardHistory: true,
       display: null,
       language: null,
+      tabOrder: [],
     },
     dragIcon: null,
     mode: "compact",
@@ -107,6 +126,7 @@ export const useNotch = create<NotchStore>((set, get) => {
     pinned: false,
     hovering: false,
     draggingOut: false,
+    reordering: false,
     successText: "",
 
     init(boot) {
@@ -195,6 +215,22 @@ export const useNotch = create<NotchStore>((set, get) => {
     setDraggingOut(dragging) {
       set({ draggingOut: dragging });
       if (!dragging && get().mode === "expanded" && !get().hovering && !get().pinned) scheduleCollapse();
+    },
+
+    setReordering(reordering) {
+      set({ reordering });
+      if (!reordering && get().mode === "expanded" && !get().hovering && !get().pinned) scheduleCollapse();
+    },
+
+    reorderTabs(visible) {
+      const { settings } = get();
+      // Tabs hidden right now, like an empty board, keep their places; the
+      // ones on show fill the slots they held, in their new order.
+      const rest = [...visible];
+      const tabOrder = orderedSections(settings.tabOrder).map((id) => (visible.includes(id) ? rest.shift()! : id));
+      // Shown at once; the native side writes it down and echoes it back.
+      set({ settings: { ...settings, tabOrder } });
+      native.setTabOrder(tabOrder).catch(() => {});
     },
   };
 });

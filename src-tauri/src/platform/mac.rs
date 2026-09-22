@@ -132,6 +132,7 @@ pub fn set_cursor(app: &AppHandle, shape: &str) {
         let cursor = match shape.as_str() {
             "pointer" => NSCursor::pointingHandCursor(),
             "grab" => NSCursor::openHandCursor(),
+            "grabbing" => NSCursor::closedHandCursor(),
             "text" => NSCursor::IBeamCursor(),
             _ => NSCursor::arrowCursor(),
         };

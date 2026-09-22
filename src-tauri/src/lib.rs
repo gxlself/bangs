@@ -150,6 +150,7 @@ pub fn run() {
             set_hit_rect,
             set_cursor,
             capture_keyboard,
+            settings::set_tab_order,
             media_command,
             lyrics::lyrics_refresh,
             dev::open_project,
