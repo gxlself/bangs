@@ -24,6 +24,31 @@ scripts/publish-site.sh         # 站点推到 gh-pages
 **资产文件名必须保留 `.dmg` / `.app.zip` / `setup.exe` / `.msi` 后缀** —— 官网靠后缀认哪个是哪个平台的包
 （见 `site/app.js` 里的 `MAC` / `WINDOWS` 两个正则），应用内的「检查更新」只认 `tag_name`。
 
+用 `gh` 一条命令就能建好：
+
+```bash
+gh release create v0.2.0 dist/release/v0.2.0/* --title "Bangs v0.2.0" --notes-file notes.md
+```
+
+## 发布说明：中英双语
+
+每个版本的说明都是**中文在前、英文在后**，中间用一条 `---` 隔开，两段内容对应：
+
+- 中文：一句话开头，然后 `## 改了什么`、`## 安装`，最后一行 `官网：https://gxlself.github.io/bangs/`
+- 英文：同样的结构，`## What's new`、`## Install`，最后一行 `Website: https://gxlself.github.io/bangs/`
+
+英文里提到界面上的东西，用应用英文界面里的原词（Board、To-do、Display、"Follow the main display"……），
+在 `src/` 里搜 `t("中文", "English")`、托盘的文字在 `src-tauri/src/tray.rs` 和 `update.rs`。
+「安装」一段照抄上一个版本，除非安装方式变了。
+
+回头改旧版本的说明时加上 `--latest=false`：
+
+```bash
+gh release edit v0.1.0 --latest=false --notes-file notes.md
+```
+
+不加的话 GitHub 可能把被改的旧版本标成 Latest，官网的下载按钮和应用里的「有新版本」就都指错了。
+
 ## 签名与公证（macOS）
 
 `build-release.sh` 会自动拿钥匙串里属于本项目团队（`W8L8ZJ3N2P`，可用 `BANGS_TEAM_ID` 改）的
