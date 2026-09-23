@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Bangs — 把刘海变成你的工作台</title>
+    <meta
+      name="description"
+      content="Bangs 是 macOS 和 Windows 通用的刘海应用：逐字歌词、Claude Code 会话、剪贴板历史、文件暂存架、待办，都收在屏幕顶端那一条里。"
+    />
+    <meta property="og:title" content="Bangs — 把刘海变成你的工作台" />
+    <meta property="og:description" content="逐字歌词、AI 会话、剪贴板、暂存架，都在屏幕顶端那一条里。macOS 与 Windows 通用。" />
+    <meta property="og:type" content="website" />
+    <link rel="icon" href="favicon.svg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div class="aurora" aria-hidden="true">
+      <span class="aurora__blob aurora__blob--a"></span>
+      <span class="aurora__blob aurora__blob--b"></span>
+      <span class="aurora__blob aurora__blob--c"></span>
+      <span class="aurora__grid"></span>
+    </div>
+
+    <header class="nav">
+      <a class="nav__brand" href="#top">
+        <span class="nav__mark" aria-hidden="true"></span>
+        Bangs
+      </a>
+      <nav class="nav__links">
+        <a href="#features" data-en="Features">功能</a>
+        <a href="#download" data-en="Download">下载</a>
+        <a href="#build" data-en="Build it">自己构建</a>
+        <button class="nav__lang" data-lang-toggle type="button">EN</button>
+        <a class="nav__repo" href="https://github.com/gxlself/bangs" rel="noopener">GitHub</a>
+      </nav>
+    </header>
+
+    <main id="top">
+      <section class="hero">
+        <p class="hero__badge" data-version-badge>
+          <span class="dot"></span>
+          <span data-version-text data-en="Checking the latest release…">正在查询最新版本…</span>
+        </p>
+        <h1 class="hero__title" data-en="That strip at the top of your screen&lt;br /&gt;&lt;span class=&quot;hero__gradient&quot;&gt;does more than you think&lt;/span&gt;">
+          屏幕顶端那一条，<br />
+          <span class="hero__gradient">可以做的事比你想的多</span>
+        </h1>
+        <p class="hero__lead" data-en="What you are listening to, the lyric filling in word by word, the Claude Code and Codex sessions you have running, what you copied, the file you dropped on it. Sweep the pointer up and it opens; move away and it is gone. On a MacBook it hugs the cutout; everywhere else it draws its own.">
+          正在听的歌、逐字滚动的歌词、跑着的 Claude Code 与 Codex 会话、复制过的东西、随手拖进去的文件 —
+          鼠标扫过去就展开，移开就消失。有刘海的 Mac 贴着刘海长，没有刘海的屏幕上，它自己画一条。
+        </p>
+
+        <div class="hero__actions">
+          <a class="button button--primary" href="#download" data-download-mac>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16.3 12.7c0-2.3 1.9-3.4 2-3.5-1.1-1.6-2.8-1.8-3.4-1.8-1.4-.2-2.8.8-3.5.8s-1.8-.8-3-.8c-1.5 0-2.9.9-3.7 2.3-1.6 2.7-.4 6.8 1.1 9 .8 1.1 1.7 2.3 2.9 2.3 1.2 0 1.6-.7 3-.7s1.8.7 3 .7 2-1.1 2.8-2.2c.9-1.3 1.2-2.5 1.3-2.6-.1 0-2.5-1-2.5-3.5zM14 5.4c.6-.8 1.1-1.9 1-3-.9 0-2.1.6-2.8 1.4-.6.7-1.1 1.8-1 2.9 1 .1 2.1-.5 2.8-1.3z"/></svg>
+            <span data-en="Download for macOS">下载 macOS 版</span>
+          </a>
+          <a class="button" href="#download" data-download-win>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5.6l7.4-1v7.1H3V5.6zm0 12.8l7.4 1v-7h-7.4v6zm8.4 1.2L21 21V12.7h-9.6v6.9zM11.4 3v7.7H21V2l-9.6 1z"/></svg>
+            <span data-en="Download for Windows">下载 Windows 版</span>
+          </a>
+        </div>
+        <p class="hero__note" data-download-note data-en="One codebase for both platforms; the builds live on GitHub Releases.">两个平台同一套代码，构建产物挂在 GitHub Release 上。</p>
+
+        <div class="stage" aria-hidden="true">
+          <div class="screen">
+            <div class="screen__bar">
+              <span class="screen__dot"></span><span class="screen__dot"></span><span class="screen__dot"></span>
+            </div>
+            <div class="screen__body">
+              <div class="notch" data-notch>
+                <div class="notch__inner">
+                  <div class="notch__compact">
+                    <span class="notch__art"></span>
+                    <span class="notch__lyric" data-lyric></span>
+                    <span class="notch__eq"><i></i><i></i><i></i><i></i></span>
+                  </div>
+                  <div class="notch__panel">
+                    <div class="notch__tabs">
+                      <span class="tab is-active">♫ 音乐</span><span class="tab">暂存</span>
+                      <span class="tab">代码</span><span class="tab">剪贴板</span><span class="tab">待办</span>
+                    </div>
+                    <div class="notch__content">
+                      <div class="cover"></div>
+                      <div class="track">
+                        <div class="track__title">起风了</div>
+                        <div class="track__line track__line--dim">这一路上走走停停</div>
+                        <div class="track__line track__line--now" data-panel-lyric></div>
+                        <div class="track__line track__line--dim">我仍感叹于世界之大</div>
+                        <div class="track__bar"><i data-progress></i></div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <p class="screen__hint" data-en="Pointer to the top → it opens">鼠标移到顶端 → 展开</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="features" id="features">
+        <h2 class="section__title" data-en="Five things it watches for you">它替你盯着的五件事</h2>
+        <div class="grid">
+          <article class="card card--wide">
+            <h3 data-en="Word-by-word lyrics">逐字歌词</h3>
+            <p data-en="Lyrics use QQ Music and NetEase with translations when available. When timed data is available, each character lights up as it is sung. Collapsed it scrolls a single original line beside the notch; open it is two lines: original and translation.">
+              歌词使用 QQ 音乐和网易云，有翻译时同步显示。歌词有时间轴时，一个字一个字地亮。收起时在刘海边上滚一行原文，展开后显示原文和翻译两行。
+              QQ 音乐、Spotify、Apple Music、浏览器里放的，谁在响就跟谁。
+            </p>
+            <div class="card__demo karaoke" data-karaoke>
+              <span>我曾将青春翻涌成她</span>
+            </div>
+          </article>
+
+          <article class="card">
+            <h3 data-en="AI sessions">AI 会话</h3>
+            <p data-en="Claude Code and Codex sessions in one list: which is working, which is waiting for you, which is idle. When one finishes, the notch opens to tell you.">Claude Code 和 Codex 的会话摆在一起：谁在跑、谁在等你回复、谁闲着。跑完了刘海自己弹出来叫你。</p>
+            <ul class="rows">
+              <li><span class="pill pill--live"></span>notch<em>已跑 24 分钟</em></li>
+              <li><span class="pill pill--wait"></span>launcher<em>等你回复</em></li>
+              <li><span class="pill"></span>viztool<em>1 小时前</em></li>
+            </ul>
+          </article>
+
+          <article class="card">
+            <h3 data-en="Editors">编辑器</h3>
+            <p data-en="Which projects VS Code and Cursor have open and on what branch. Click a row to open it there.">VS Code 和 Cursor 里开着哪些项目、各在哪个分支，点一行就用对应编辑器打开。</p>
+            <ul class="rows">
+              <li><span class="pill pill--code"></span>aura<em>feature/launcher</em></li>
+              <li><span class="pill pill--code"></span>dataset<em>feature/data-trip</em></li>
+            </ul>
+          </article>
+
+          <article class="card">
+            <h3 data-en="Clipboard">剪贴板</h3>
+            <p data-en="Scroll down and it keeps loading older entries; click one to put it back on the clipboard. On macOS it reads your own &lt;a href=&quot;https://paste.gxlself.com&quot; rel=&quot;noopener&quot;&gt;Paste&lt;/a&gt;; on Windows it keeps the history itself (and skips anything a password manager marked private).">
+              往下滚一直加载更早的记录，点一条放回剪贴板。macOS 直接读你的
+              <a href="https://paste.gxlself.com" rel="noopener">Paste</a>，Windows 自己记（密码管理器标记过的内容会跳过）。
+            </p>
+          </article>
+
+          <article class="card">
+            <h3 data-en="Shelf">暂存架</h3>
+            <p data-en="Drop files on the notch to park them, drag them back out into another window. No more hunting for an empty patch of desktop.">文件拖到刘海上先放着，换个窗口再拖出去。跨应用搬文件不用再找一块空桌面。</p>
+          </article>
+
+          <article class="card">
+            <h3 data-en="To-do">待办</h3>
+            <p data-en="Type a line, press return. Click it when it is done and the words come apart and blow off the list — nothing is kept. It is the one place the notch takes the keyboard, and only while the field is focused.">输入一行，回车记下；做完点一下，字就散开飘走，不留已完成。这是刘海唯一会用键盘的地方，也只在输入框聚焦时才借。</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="download" id="download">
+        <h2 class="section__title" data-en="Download">下载</h2>
+        <div class="download__grid">
+          <article class="release" data-release-mac>
+            <header>
+              <h3>macOS</h3>
+              <span class="release__meta" data-mac-meta>Apple 芯片 · macOS 12+</span>
+            </header>
+            <a class="button button--primary" href="https://github.com/gxlself/bangs/releases/latest" data-mac-link>
+              <span data-en="Get the latest">获取最新版</span>
+            </a>
+            <p class="release__hint" data-en="Signed with a Developer ID and notarized by Apple, so it opens on a double click.">
+              用 Developer ID 签了名并经过 Apple 公证，下载下来双击就能打开。
+            </p>
+          </article>
+          <article class="release" data-release-win>
+            <header>
+              <h3>Windows</h3>
+              <span class="release__meta" data-win-meta>Windows 10 / 11 · 需要 WebView2</span>
+            </header>
+            <a class="button" href="https://github.com/gxlself/bangs/releases/latest" data-win-link>
+              <span data-en="Get the latest">获取最新版</span>
+            </a>
+            <p class="release__hint" data-en="The installer is unsigned, so SmartScreen stops it once: More info → Run anyway. Afterwards the icon sits in the notification area; right-click it for the version and the settings.">
+              安装包没签名，SmartScreen 会拦一下，点「更多信息 → 仍要运行」。
+              装好后图标在右下角托盘里，右键能看到版本和设置。
+            </p>
+          </article>
+        </div>
+        <p class="download__all" data-en="Every version and its notes are on &lt;a href=&quot;https://github.com/gxlself/bangs/releases&quot; rel=&quot;noopener&quot;&gt;Releases&lt;/a&gt;. The app checks too: the last row of the tray menu is the version it is running, and it says so when a newer one is out.">
+          全部版本和更新说明都在 <a href="https://github.com/gxlself/bangs/releases" rel="noopener">Releases</a>。
+          应用自己也会查：托盘菜单最底下那行就是当前版本，有新版会写「有新版本」，点一下跳到这里。
+        </p>
+      </section>
+
+      <section class="build" id="build">
+        <h2 class="section__title" data-en="Build it yourself">自己构建</h2>
+        <pre class="code"><code>git clone https://github.com/gxlself/bangs.git
+cd bangs
+pnpm install
+pnpm tauri dev          <span class="c" data-en="# develop"># 开发</span>
+scripts/version.sh 0.2.0 <span class="c" data-en="# set the version (three files at once)"># 改版本号（三个文件一起改）</span>
+scripts/build-release.sh <span class="c" data-en="# build both platforms into dist/release/"># 打两端的安装包到 dist/release/</span></code></pre>
+        <p class="build__note" data-en="Tauri 2 + React + Rust. On macOS it is an NSPanel sitting above the menu bar; on Windows the window is clipped to the notch shape. Neither takes focus, so clicking it never interrupts what you are typing.">
+          Tauri 2 + React + Rust。macOS 那侧用 NSPanel 贴在菜单栏之上，Windows 用窗口区域裁剪出刘海形状 —
+          两边都不抢焦点，点它不会打断你正在写的东西。
+        </p>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <span>Bangs · MIT</span>
+      <a href="https://github.com/gxlself/bangs" rel="noopener">github.com/gxlself/bangs</a>
+    </footer>
+
+    <script src="app.js"></script>
+  </body>
+</html>
