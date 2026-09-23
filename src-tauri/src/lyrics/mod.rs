@@ -455,7 +455,11 @@ fn unix_seconds() -> u64 {
 }
 
 fn client() -> Option<reqwest::blocking::Client> {
+    // QQ Music and NetEase are reached directly: a proxy left in the
+    // environment after its program has quit (http_proxy pointing at a closed
+    // local port) otherwise fails every lookup and shows as "no lyrics".
     reqwest::blocking::Client::builder()
+        .no_proxy()
         .timeout(REQUEST_TIMEOUT)
         .user_agent("Mozilla/5.0")
         .build()
