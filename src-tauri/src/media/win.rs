@@ -45,12 +45,17 @@ struct Stopwatch {
 }
 
 impl Stopwatch {
-    fn elapsed(&mut self, track: &str, playing: bool) -> Option<f64> {
+    /// The player id the track key starts with.
+    fn player(&self) -> &str {
+        self.track.split('\u{1f}').next().unwrap_or_default()
+    }
+
+    fn observe(&mut self, track: &str, playing: bool) {
         if self.track != track {
-            // The track key starts with the player's id; another app taking
-            // over the media session and handing it back is not a new song.
-            let player = |key: &str| key.split('\u{1f}').next().map(str::to_string);
-            let trusted = !self.track.is_empty() && player(&self.track) == player(track);
+            // Another app taking over the media session and handing it back
+            // is not a new song, so only a change within one player counts.
+            let same_player = self.player() == track.split('\u{1f}').next().unwrap_or_default();
+            let trusted = !self.track.is_empty() && same_player;
             *self = Stopwatch { track: track.to_string(), trusted, ..Stopwatch::default() };
         }
         match (playing, self.running_since) {
@@ -61,10 +66,75 @@ impl Stopwatch {
             }
             _ => {}
         }
-        self.trusted.then(|| {
+    }
+
+    fn position(&self, track: &str) -> Option<f64> {
+        (self.trusted && self.track == track).then(|| {
             self.banked + self.running_since.map_or(0.0, |since| since.elapsed().as_secs_f64())
         })
     }
+}
+
+/// Keeps the stopwatch up to date with the player it follows, even while
+/// another app holds the media session: a pause or a new track there must not
+/// go unseen. A player that has no session any more has quit, and whatever it
+/// shows next may be a track it restored halfway through.
+fn tick_stopwatch(
+    manager: &SessionManager,
+    current: Option<&Session>,
+    stopwatch: &mut Stopwatch,
+) -> windows::core::Result<()> {
+    if let Some(sample) = current.map(sample).transpose()?.flatten() {
+        if !sample.has_timeline {
+            stopwatch.observe(&sample.track, sample.playing);
+            return Ok(());
+        }
+    }
+    if stopwatch.track.is_empty() {
+        return Ok(());
+    }
+    for session in manager.GetSessions()? {
+        if session.SourceAppUserModelId()?.to_string() == stopwatch.player() {
+            if let Some(sample) = sample(&session)? {
+                stopwatch.observe(&sample.track, sample.playing);
+            }
+            return Ok(());
+        }
+    }
+    *stopwatch = Stopwatch::default();
+    Ok(())
+}
+
+struct Sample {
+    track: String,
+    playing: bool,
+    has_timeline: bool,
+}
+
+fn sample(session: &Session) -> windows::core::Result<Option<Sample>> {
+    let properties = session.TryGetMediaPropertiesAsync()?.get()?;
+    let title = properties.Title()?.to_string();
+    if title.is_empty() {
+        return Ok(None);
+    }
+    let timeline = session.GetTimelineProperties()?;
+    let has_timeline = timeline.EndTime()?.Duration > timeline.StartTime()?.Duration
+        || timeline.Position()?.Duration != 0
+        || timeline.LastUpdatedTime()?.UniversalTime > UNIX_EPOCH_TICKS;
+    Ok(Some(Sample {
+        track: track_key(
+            &session.SourceAppUserModelId()?.to_string(),
+            &title,
+            &properties.Artist()?.to_string(),
+            &properties.AlbumTitle()?.to_string(),
+        ),
+        playing: session.GetPlaybackInfo()?.PlaybackStatus()? == PlaybackStatus::Playing,
+        has_timeline,
+    }))
+}
+
+fn track_key(source_id: &str, title: &str, artist: &str, album: &str) -> String {
+    format!("{source_id}\u{1f}{title}\u{1f}{artist}\u{1f}{album}")
 }
 
 pub fn start(app: AppHandle) {
@@ -88,14 +158,12 @@ pub fn start(app: AppHandle) {
             // The current session changes as players start and stop, so it
             // is looked up on every poll rather than subscribed to once.
             let session = manager.GetCurrentSession().ok();
-            if session.is_none() {
-                // The player quit; whatever it shows next may be a track it
-                // restored halfway through.
-                stopwatch = Stopwatch::default();
+            if let Err(error) = tick_stopwatch(&manager, session.as_ref(), &mut stopwatch) {
+                eprintln!("[media] stopwatch update failed: {error}");
             }
             let state = session
                 .as_ref()
-                .and_then(|session| read_session(session, &mut artwork, &mut stopwatch).ok().flatten());
+                .and_then(|session| read_session(session, &mut artwork, &stopwatch).ok().flatten());
             publish(&app, state);
 
             match commands.recv_timeout(POLL) {
@@ -118,7 +186,7 @@ pub fn start(app: AppHandle) {
 fn read_session(
     session: &Session,
     artwork: &mut ArtworkCache,
-    stopwatch: &mut Stopwatch,
+    stopwatch: &Stopwatch,
 ) -> windows::core::Result<Option<MediaState>> {
     let properties = session.TryGetMediaPropertiesAsync()?.get()?;
     let title = properties.Title()?.to_string();
@@ -140,7 +208,7 @@ fn read_session(
 
     // Players often publish the thumbnail well after the title — some only
     // once playback actually starts — so keep asking for a while.
-    let track = format!("{source_id}\u{1f}{title}\u{1f}{artist}\u{1f}{album}");
+    let track = track_key(&source_id, &title, &artist, &album);
     let (elapsed, elapsed_at) = if has_timeline {
         (
             duration.map(|_| (position - start) as f64 / TICKS_PER_SECOND),
@@ -151,7 +219,7 @@ fn read_session(
             },
         )
     } else {
-        (stopwatch.elapsed(&track, playing), now_ms())
+        (stopwatch.position(&track), now_ms())
     };
     if artwork.track != track {
         *artwork = ArtworkCache { track, ..ArtworkCache::default() };
