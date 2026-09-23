@@ -21,6 +21,15 @@ if (Test-Path "$src\release.bundle") {
 }
 Set-Location "$src\repo"
 
+# The box often cannot reach GitHub (its git points at a proxy that is not
+# running), and cargo then fails fetching the tauri-nspanel git dependency.
+# That checkout is already cached, so build offline when GitHub is out of reach.
+git ls-remote https://github.com/ahkohd/tauri-nspanel HEAD 2>&1 | Out-Null
+if ($LASTEXITCODE -ne 0) {
+  Write-Output "GitHub unreachable, building with CARGO_NET_OFFLINE"
+  $env:CARGO_NET_OFFLINE = 'true'
+}
+
 $log = "$src\build.log"
 "windows build $(Get-Date -Format s)" | Set-Content $log
 # The target directory is a cache that keeps old bundles; clearing them means
