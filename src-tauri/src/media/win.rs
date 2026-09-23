@@ -1,6 +1,6 @@
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use tauri::{AppHandle, Manager};
@@ -29,6 +29,44 @@ struct ArtworkCache {
     data_url: Option<String>,
 }
 
+/// Position kept by Bangs itself for players that publish no timeline at all
+/// (NetEase Cloud Music on Windows reports start, end and position as zero and
+/// never updates them). It runs only while the player says it is playing, and
+/// it is only trusted for a track Bangs saw begin: one that replaced another
+/// track in the same player. A track already under way when Bangs started, or
+/// the one a player restores at launch, could be anywhere, and a wrong lyric
+/// is worse than none. A seek inside the player cannot be seen at all.
+#[derive(Default)]
+struct Stopwatch {
+    track: String,
+    trusted: bool,
+    banked: f64,
+    running_since: Option<Instant>,
+}
+
+impl Stopwatch {
+    fn elapsed(&mut self, track: &str, playing: bool) -> Option<f64> {
+        if self.track != track {
+            // The track key starts with the player's id; another app taking
+            // over the media session and handing it back is not a new song.
+            let player = |key: &str| key.split('\u{1f}').next().map(str::to_string);
+            let trusted = !self.track.is_empty() && player(&self.track) == player(track);
+            *self = Stopwatch { track: track.to_string(), trusted, ..Stopwatch::default() };
+        }
+        match (playing, self.running_since) {
+            (true, None) => self.running_since = Some(Instant::now()),
+            (false, Some(since)) => {
+                self.banked += since.elapsed().as_secs_f64();
+                self.running_since = None;
+            }
+            _ => {}
+        }
+        self.trusted.then(|| {
+            self.banked + self.running_since.map_or(0.0, |since| since.elapsed().as_secs_f64())
+        })
+    }
+}
+
 pub fn start(app: AppHandle) {
     let (sender, commands) = mpsc::channel();
     app.state::<MediaHub>().set_sender(sender);
@@ -45,13 +83,19 @@ pub fn start(app: AppHandle) {
         };
 
         let mut artwork = ArtworkCache::default();
+        let mut stopwatch = Stopwatch::default();
         loop {
             // The current session changes as players start and stop, so it
             // is looked up on every poll rather than subscribed to once.
             let session = manager.GetCurrentSession().ok();
+            if session.is_none() {
+                // The player quit; whatever it shows next may be a track it
+                // restored halfway through.
+                stopwatch = Stopwatch::default();
+            }
             let state = session
                 .as_ref()
-                .and_then(|session| read_session(session, &mut artwork).ok().flatten());
+                .and_then(|session| read_session(session, &mut artwork, &mut stopwatch).ok().flatten());
             publish(&app, state);
 
             match commands.recv_timeout(POLL) {
@@ -74,6 +118,7 @@ pub fn start(app: AppHandle) {
 fn read_session(
     session: &Session,
     artwork: &mut ArtworkCache,
+    stopwatch: &mut Stopwatch,
 ) -> windows::core::Result<Option<MediaState>> {
     let properties = session.TryGetMediaPropertiesAsync()?.get()?;
     let title = properties.Title()?.to_string();
@@ -91,10 +136,23 @@ fn read_session(
     let position = timeline.Position()?.Duration;
     let updated = timeline.LastUpdatedTime()?.UniversalTime;
     let duration = (end > start).then(|| (end - start) as f64 / TICKS_PER_SECOND);
+    let has_timeline = duration.is_some() || position != 0 || updated > UNIX_EPOCH_TICKS;
 
     // Players often publish the thumbnail well after the title — some only
     // once playback actually starts — so keep asking for a while.
     let track = format!("{source_id}\u{1f}{title}\u{1f}{artist}\u{1f}{album}");
+    let (elapsed, elapsed_at) = if has_timeline {
+        (
+            duration.map(|_| (position - start) as f64 / TICKS_PER_SECOND),
+            if updated > UNIX_EPOCH_TICKS {
+                (updated - UNIX_EPOCH_TICKS) as f64 / 10_000.0
+            } else {
+                now_ms()
+            },
+        )
+    } else {
+        (stopwatch.elapsed(&track, playing), now_ms())
+    };
     if artwork.track != track {
         *artwork = ArtworkCache { track, ..ArtworkCache::default() };
     }
@@ -118,12 +176,8 @@ fn read_session(
         source_id,
         playing,
         duration,
-        elapsed: duration.map(|_| (position - start) as f64 / TICKS_PER_SECOND),
-        elapsed_at: if updated > UNIX_EPOCH_TICKS {
-            (updated - UNIX_EPOCH_TICKS) as f64 / 10_000.0
-        } else {
-            now_ms()
-        },
+        elapsed,
+        elapsed_at,
         artwork: artwork.data_url.clone(),
     }))
 }
