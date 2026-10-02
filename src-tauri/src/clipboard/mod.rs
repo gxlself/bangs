@@ -107,6 +107,19 @@ fn publish(app: &AppHandle, next: ClipboardState) {
     let _ = app.emit("bangs://clipboard", next);
 }
 
+/// The picture of an image entry, for sync; `None` for anything else, and
+/// everywhere but macOS (the Windows history keeps no pictures).
+pub fn image_bytes(app: &AppHandle, id: i64) -> Option<Vec<u8>> {
+    let _ = app;
+    #[cfg(target_os = "macos")]
+    return mac::image_bytes(id);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = id;
+        None
+    }
+}
+
 /// The whole text of these text entries, by id, for sync: the panel itself
 /// only ever holds a preview. Pictures and files have no entry in the result.
 /// `None` when the history cannot be read right now.

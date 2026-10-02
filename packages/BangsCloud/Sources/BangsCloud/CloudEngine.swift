@@ -57,6 +57,8 @@ public actor CloudEngine {
     /// More cached system fields than this and half are dropped; a dropped one only costs
     /// one extra round trip the next time that record changes.
     static let maxSystemFields = 4000
+    /// A clipboard picture rides in the record's encrypted values, which share its 1 MB limit.
+    static let maxImageBytes = 900_000
 
     static let recordType = "BangsRecord"
     static let zoneName = "Bangs"
@@ -669,7 +671,19 @@ public actor CloudEngine {
         ckRecord["device"] = NSString(string: record.device)
         ckRecord["deleted"] = NSNumber(value: Int64(record.deleted ? 1 : 0))
         ckRecord.encryptedValues["body"] = NSString(string: record.body.jsonString)
-        if let path = record.asset, FileManager.default.fileExists(atPath: path) {
+        let path = record.asset.flatMap { FileManager.default.fileExists(atPath: $0) ? $0 : nil }
+        if record.kind == "clip" {
+            // A copied picture can be as private as a password: it goes end-to-end encrypted,
+            // as bytes, which CloudKit only offers for values, not for CKAssets.
+            ckRecord["asset"] = nil
+            if let path = path,
+               let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+               data.count <= CloudEngine.maxImageBytes {
+                ckRecord.encryptedValues["image"] = data as NSData
+            } else {
+                ckRecord.encryptedValues["image"] = nil
+            }
+        } else if let path = path {
             ckRecord["asset"] = CKAsset(fileURL: URL(fileURLWithPath: path))
         } else {
             ckRecord["asset"] = nil
@@ -704,8 +718,16 @@ public actor CloudEngine {
         }
 
         var assetPath: String? = nil
-        if keepAssets, !deleted, let asset = ckRecord["asset"] as? CKAsset {
-            assetPath = copyAsset(asset, recordName: name)
+        if keepAssets, !deleted {
+            if kind == "clip", let image = ckRecord.encryptedValues["image"] as? Data {
+                assetPath = storeAsset(recordName: name) { destination in
+                    try image.write(to: destination, options: .atomic)
+                }
+            } else if let asset = ckRecord["asset"] as? CKAsset, let source = asset.fileURL {
+                assetPath = storeAsset(recordName: name) { destination in
+                    try FileManager.default.copyItem(at: source, to: destination)
+                }
+            }
         }
 
         return SyncRecord(
@@ -719,9 +741,9 @@ public actor CloudEngine {
         )
     }
 
-    /// CloudKit hands out a temporary file; keep a copy at <state>/assets/<recordName with ':' -> '_'>.
-    private func copyAsset(_ asset: CKAsset, recordName: String) -> String? {
-        guard let source = asset.fileURL else { return nil }
+    /// Keeps a downloaded file — a CKAsset's temporary copy, or a clipboard picture's bytes — at
+    /// <state>/assets/<recordName with ':' -> '_'>.
+    private func storeAsset(recordName: String, write: (URL) throws -> Void) -> String? {
         let fileManager = FileManager.default
         let directory = stateDirectory.appendingPathComponent(CloudEngine.assetsDirectoryName, isDirectory: true)
         var fileName = recordName.replacingOccurrences(of: ":", with: "_")
@@ -737,7 +759,7 @@ public actor CloudEngine {
             if fileManager.fileExists(atPath: destination.path) {
                 try fileManager.removeItem(at: destination)
             }
-            try fileManager.copyItem(at: source, to: destination)
+            try write(destination)
             return destination.path
         } catch {
             return nil

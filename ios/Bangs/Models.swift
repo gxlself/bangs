@@ -193,6 +193,7 @@ private struct ClipBody: Codable {
     var pinned: Bool?
     var createdAt: Int64?
     var host: String?
+    var hasImage: Bool?
 }
 
 struct ClipItem: Identifiable, Equatable {
@@ -204,10 +205,13 @@ struct ClipItem: Identifiable, Equatable {
     let pinned: Bool
     let createdAt: Int64
     let host: String
+    /// A picture: the Mac sent it (as a JPEG, end-to-end encrypted) and it is downloaded, or
+    /// on its way. False when it was too big to send.
+    let hasImage: Bool
 
     init(
         id: String, type: String, preview: String, text: String?, app: String,
-        pinned: Bool, createdAt: Int64, host: String
+        pinned: Bool, createdAt: Int64, host: String, hasImage: Bool = false
     ) {
         self.id = id
         self.type = type
@@ -217,7 +221,11 @@ struct ClipItem: Identifiable, Equatable {
         self.pinned = pinned
         self.createdAt = createdAt
         self.host = host
+        self.hasImage = hasImage
     }
+
+    var isImage: Bool { type == "image" }
+    var isFiles: Bool { type == "files" }
 
     init?(record: SyncRecord) {
         guard record.kind == "clip", !record.deleted,
@@ -233,7 +241,8 @@ struct ClipItem: Identifiable, Equatable {
             app: body.app ?? "",
             pinned: body.pinned ?? false,
             createdAt: body.createdAt ?? record.updatedAt,
-            host: body.host ?? ""
+            host: body.host ?? "",
+            hasImage: body.hasImage ?? false
         )
     }
 

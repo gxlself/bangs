@@ -38,6 +38,10 @@ pub use ledger::Record;
 const CLIP_WINDOW: usize = crate::clipboard::PAGE;
 /// The longest clipboard text that is sent whole.
 const CLIP_CHARS: usize = 8_000;
+/// A copied picture goes to the phone as a JPEG of at most this many bytes. It
+/// travels inside the record's end-to-end encrypted values, which share the
+/// record's 1 MB limit; one that cannot be made this small stays on the Mac.
+const CLIP_IMAGE_BYTES: u64 = 900_000;
 /// Bigger files stay on the Mac; the phone still sees that they exist.
 const SHELF_FILE_BYTES: u64 = 25_000_000;
 const DAY_MS: u64 = 24 * 60 * 60 * 1000;
@@ -635,8 +639,8 @@ fn reconcile_clips(app: &AppHandle) {
         if !seen.insert(id.clone()) {
             continue;
         }
+        let image = if item.kind == ClipKind::Image { clip_image(app, item.id, &id) } else { None };
         desired.push(Desired {
-            id,
             body: json!({
                 "type": item.kind,
                 "preview": item.preview,
@@ -645,11 +649,70 @@ fn reconcile_clips(app: &AppHandle) {
                 "pinned": item.pinned,
                 "createdAt": item.created_at as u64,
                 "host": host,
+                // Also what makes a picture that only now could be made go out again.
+                "hasImage": image.is_some(),
             }),
-            asset: None,
+            asset: image,
+            id,
         });
     }
+    prune_clip_images(app, &seen);
     reconcile(app, CLIP, desired);
+}
+
+/// The JPEG the phone gets for a copied picture, made once and kept in
+/// `<config>/sync/clips/<record id>.jpg` while the entry is in the window.
+fn clip_image(app: &AppHandle, clip_id: i64, record_id: &str) -> Option<String> {
+    let dir = sync_dir(app)?.join("clips");
+    let jpeg = dir.join(format!("{record_id}.jpg"));
+    if !jpeg.exists() {
+        let bytes = crate::clipboard::image_bytes(app, clip_id)?;
+        std::fs::create_dir_all(&dir).ok()?;
+        let raw = dir.join(format!("{record_id}.raw"));
+        std::fs::write(&raw, bytes).ok()?;
+        let made = shrink_to_jpeg(&raw, &jpeg);
+        let _ = std::fs::remove_file(&raw);
+        if !made {
+            return None;
+        }
+    }
+    Some(jpeg.to_string_lossy().into_owned())
+}
+
+/// Turns any picture into a JPEG under `CLIP_IMAGE_BYTES`, smaller and rougher
+/// until it fits, with macOS's own `sips`.
+fn shrink_to_jpeg(source: &Path, target: &Path) -> bool {
+    #[cfg(target_os = "macos")]
+    for (side, quality) in [(1600, 75), (1024, 60), (640, 50)] {
+        let made = std::process::Command::new("/usr/bin/sips")
+            .args(["-s", "format", "jpeg", "-s", "formatOptions", &quality.to_string(), "-Z", &side.to_string()])
+            .arg(source)
+            .arg("--out")
+            .arg(target)
+            .output()
+            .is_ok_and(|output| output.status.success());
+        let size = std::fs::metadata(target).map(|meta| meta.len()).unwrap_or(u64::MAX);
+        if made && size <= CLIP_IMAGE_BYTES {
+            return true;
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = source;
+    let _ = std::fs::remove_file(target);
+    false
+}
+
+/// Pictures of entries that have left the window are not needed any more.
+fn prune_clip_images(app: &AppHandle, keep: &std::collections::HashSet<String>) {
+    let Some(dir) = sync_dir(app).map(|dir| dir.join("clips")) else { return };
+    let Ok(entries) = std::fs::read_dir(&dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let stem = path.file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_default();
+        if !keep.contains(&stem) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 /// The shelf panel lives in the webview; it reports the whole list whenever

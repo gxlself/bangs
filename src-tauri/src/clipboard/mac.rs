@@ -181,6 +181,29 @@ pub fn full_texts(ids: &[i64]) -> Option<HashMap<i64, String>> {
     Some(texts)
 }
 
+/// The picture of an image entry as Paste stored it (PNG, TIFF, JPEG…), for sync.
+pub fn image_bytes(id: i64) -> Option<Vec<u8>> {
+    let connection = connect()?;
+    let stored: Vec<u8> = connection
+        .query_row(
+            "SELECT ZIMAGEDATA FROM ZCLIPBOARDITEMENTITY WHERE Z_PK = ?1 AND ZTYPE = ?2",
+            rusqlite::params![id, KIND_IMAGE],
+            |row| row.get(0),
+        )
+        .ok()?;
+    match stored.first() {
+        // Core Data's markers for a blob that may live outside the store: 1, the bytes
+        // follow; 2, the name of the file it keeps beside the store follows.
+        Some(1) => Some(stored[1..].to_vec()),
+        Some(2) => {
+            let name = String::from_utf8_lossy(&stored[1..]).trim_end_matches('\0').trim().to_string();
+            let dir = store_path()?.parent()?.join(".PasteTool_SUPPORT/_EXTERNAL_DATA");
+            std::fs::read(dir.join(name)).ok()
+        }
+        _ => Some(stored),
+    }
+}
+
 /// Puts a history entry back on the clipboard — the picture itself for an
 /// image, the files for a file entry, the words for anything else.
 pub fn copy(app: AppHandle, id: i64) -> Result<(), String> {

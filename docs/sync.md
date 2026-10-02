@@ -24,7 +24,7 @@ Windows 版没有 iCloud，同步保持关闭，行为和以前完全一样。
 | --- | --- | --- | --- |
 | `todo` | 双向 | Mac 生成的 id，或 iOS 生成的 UUID | 勾选 = 完成（`done`，可以再勾回来），是对记录的修改；删除才写墓碑 |
 | `session` | Mac → iOS | `<device8>-<会话 id>` | Claude Code / Codex 会话的忙碌、等待、空闲；Mac 上消失的会话写墓碑 |
-| `clip` | Mac → iOS | `<device8>-<内容哈希>` | 最近 24 条剪贴板（面板的第一页）；文本带全文（≤ 8000 字符），图片/文件只有预览文字。读不到 Paste 的数据库时这一轮不动，免得 id 全变 |
+| `clip` | Mac → iOS | `<device8>-<内容哈希>` | 最近 24 条剪贴板（面板的第一页）；文本带全文（≤ 8000 字符），图片转成 ≤ 900 KB 的 JPEG 端到端加密同步，文件只有预览文字。读不到 Paste 的数据库时这一轮不动，免得 id 全变 |
 | `shelf` | Mac → iOS | `<device8>-<路径哈希>` | 文件架；≤ 25 MB（25,000,000 字节，十进制）的文件作为 CKAsset 上传，更大的只同步元数据。文件夹不同步 |
 
 - `device8` 是设备 id（随机 UUID，去掉连字符取前 8 位小写十六进制）。镜像类 kind 的 id 带设备前缀，
@@ -54,6 +54,7 @@ Windows 版没有 iCloud，同步保持关闭，行为和以前完全一样。
 | `deleted` | Int64 | 1 = 墓碑。删除用墓碑而不是 `CKDatabase.deleteRecord`，这样落后的设备也能知道它没了 |
 | `body` | String | 下面的 JSON 文本，≤ 64 KB；墓碑写 `{}`。**写入 `record.encryptedValues["body"]`，不是普通字段**，读取同理 |
 | `asset` | Asset（可选） | 只有 `shelf` 用；普通字段（不加密） |
+| `image` | Bytes（可选） | 只有 `clip` 用：复制的图片，Mac 用 `sips` 转成 ≤ 900 KB 的 JPEG（最长边 1600 → 1024 → 640 逐级缩小）。**写入 `encryptedValues["image"]`**——CKAsset 没法端到端加密，截图可能和密码一样私密。传输格式里仍然是 `asset` 路径，引擎按 kind 决定放哪 |
 
 所有设备共用一种记录类型，是为了不让两端各自维护字段映射：加字段只改 `body`，不用动生产 schema。
 
@@ -84,7 +85,8 @@ Windows 版没有 iCloud，同步保持关闭，行为和以前完全一样。
   "preview": "https://…",       // 折叠空白、截断后的一行
   "text": "完整文本…",           // 只有 type = text 才有，≤ 8000 字符
   "app": "Safari", "pinned": false,
-  "createdAt": 1760000000000, "host": "gxl 的 MacBook Pro" }
+  "createdAt": 1760000000000, "host": "gxl 的 MacBook Pro",
+  "hasImage": false }            // type = image 时：图片是否同步了（太大的为 false）
 
 // shelf
 { "name": "报价单.pdf", "extension": "pdf", "size": 183204,

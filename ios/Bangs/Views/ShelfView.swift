@@ -28,7 +28,13 @@ struct ShelfView: View {
                         Button {
                             open(item)
                         } label: {
-                            ShelfRow(item: item, state: state(of: item))
+                            ShelfRow(
+                                item: item,
+                                state: state(of: item),
+                                picture: state(of: item) == .available
+                                    ? AssetFiles.url(forKey: item.id, stateDirectory: model.stateDirectory)
+                                    : nil
+                            )
                         }
                         .buttonStyle(.plain)
                     }
@@ -72,13 +78,19 @@ private enum ShelfFileState {
 private struct ShelfRow: View {
     let item: ShelfItem
     let state: ShelfFileState
+    /// The downloaded file, when there is one.
+    let picture: URL?
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
-            Image(systemName: item.isImage ? "photo" : "doc")
-                .font(.title3)
-                .foregroundColor(state == .available ? .accentColor : Color.secondary)
-                .frame(width: 28, height: 28)
+            if item.isImage, let picture = picture {
+                ThumbnailView(url: picture, side: 36)
+            } else {
+                Image(systemName: item.isImage ? "photo" : "doc")
+                    .font(.title3)
+                    .foregroundColor(state == .available ? .accentColor : Color.secondary)
+                    .frame(width: 36, height: 36)
+            }
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(item.name)

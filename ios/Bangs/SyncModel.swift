@@ -305,8 +305,9 @@ final class SyncModel: ObservableObject {
                 saveStore()
                 publish()
                 announceWaiting(adopted, before: before)
-                // A file taken off the Mac's shelf: its downloaded copy goes too.
-                for record in adopted where record.kind == "shelf" && record.deleted {
+                // A file taken off the Mac's shelf, a picture out of the clipboard window: the
+                // downloaded copy goes too.
+                for record in adopted where (record.kind == "shelf" || record.kind == "clip") && record.deleted {
                     try? FileManager.default.removeItem(at: AssetFiles.url(forKey: record.key, stateDirectory: stateDirectory))
                 }
             }
