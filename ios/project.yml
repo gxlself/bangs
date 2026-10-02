@@ -71,3 +71,13 @@ targets:
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
         ITSAppUsesNonExemptEncryption: false
+
+schemes:
+  Bangs:
+    build:
+      targets:
+        Bangs: all
+    run:
+      config: Debug
+    archive:
+      config: Release

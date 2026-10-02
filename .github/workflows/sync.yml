@@ -1,0 +1,75 @@
+# Builds what cannot be built anywhere but a Mac: the Swift sync package, the
+# iPhone app and the macOS app with iCloud sync linked in. Nothing is signed;
+# this proves it compiles, links and passes its tests (docs/sync.md).
+name: sync
+
+on:
+  push:
+    paths:
+      - "packages/**"
+      - "ios/**"
+      - "src-tauri/**"
+      - "src/**"
+      - "docs/sync-vectors.json"
+      - ".github/workflows/sync.yml"
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: sync-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  swift-package:
+    name: Swift package (swift test)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift --version
+      - run: swift test --package-path packages/BangsCloud
+
+  ios-app:
+    name: iPhone app (xcodebuild, simulator)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install xcodegen
+      - run: xcodegen generate
+        working-directory: ios
+      - name: Build
+        working-directory: ios
+        run: |
+          xcodebuild -version
+          xcodebuild -project Bangs.xcodeproj -scheme Bangs \
+            -destination 'generic/platform=iOS Simulator' \
+            -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+  mac-app:
+    name: macOS app (cargo, --features icloud)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # generate_context! needs the built frontend, and tsc checks the webview.
+      - run: pnpm build
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Tests (default features)
+        working-directory: src-tauri
+        run: cargo test --lib
+      - name: Build and test with the Swift bridge linked in
+        working-directory: src-tauri
+        run: |
+          cargo test --lib --features icloud
+          cargo build --features icloud
