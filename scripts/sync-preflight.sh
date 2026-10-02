@@ -27,7 +27,8 @@ if [[ "$(uname)" != "Darwin" ]]; then
 fi
 
 echo "== 工具 =="
-if xcode_version="$(xcodebuild -version 2>/dev/null | head -1)"; then
+# sed, not head: head stops reading early and pipefail then fails on SIGPIPE.
+if xcode_version="$(xcodebuild -version 2>/dev/null | sed -n 1p)"; then
   major="$(echo "$xcode_version" | awk '{print $2}' | cut -d. -f1)"
   if [[ "${major:-0}" -ge 15 ]]; then ok "$xcode_version"; else bad "$xcode_version" "需要 Xcode 15 或更新"; fi
 else
@@ -40,8 +41,20 @@ if command -v cargo >/dev/null; then ok "$(cargo --version)"; else bad "没有 R
 [[ -d node_modules ]] && ok "node_modules 已装" || warn "还没装前端依赖" "pnpm install"
 
 echo "== 签名 =="
+source scripts/lib/profile-identity.sh
 identity="$(security find-identity -v -p codesigning 2>/dev/null | awk -F'"' '/Apple Development/ { print $2; exit }')"
-if [[ -n "$identity" ]]; then ok "开发证书：$identity"; else bad "钥匙串里没有 Apple Development 证书" "Xcode → Settings → Accounts → Manage Certificates → + Apple Development"; fi
+if [[ -z "$identity" ]]; then
+  bad "钥匙串里没有 Apple Development 证书" "Xcode → Settings → Accounts → Manage Certificates → + Apple Development"
+elif [[ -f "$profile" ]]; then
+  # With certificates of several teams in the keychain the first one is often
+  # not the one the profile was made for; dev-icloud.sh signs with the match.
+  matched="$(profile_identity "$profile")"
+  if [[ -n "$matched" ]]; then
+    ok "开发证书：$(security find-identity -v -p codesigning | awk -F'"' -v sha="$matched" '$0 ~ sha { print $2; exit }')"
+  else
+    bad "钥匙串里没有 $profile 登记的开发证书" "用钥匙串里的证书重新生成 profile，或在 Xcode 里给团队 $team 建一张 Apple Development 证书"
+  fi
+fi
 
 if [[ -f "$profile" ]]; then
   plist="$(security cms -D -i "$profile" 2>/dev/null)"

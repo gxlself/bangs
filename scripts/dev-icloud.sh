@@ -8,8 +8,8 @@
 #   scripts/dev-icloud.sh --no-run   # build and sign only
 #
 # Needs src-tauri/icloud/dev.provisionprofile (src-tauri/icloud/README.md) and an
-# "Apple Development" certificate in the keychain; BANGS_DEV_IDENTITY picks one
-# when there are several.
+# "Apple Development" certificate in the keychain that the profile lists;
+# BANGS_DEV_IDENTITY overrides the choice.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -21,9 +21,12 @@ if [[ ! -f "$profile" ]]; then
   echo "放到这个路径，细节见 src-tauri/icloud/README.md" >&2
   exit 1
 fi
-identity="${BANGS_DEV_IDENTITY:-$(security find-identity -v -p codesigning | awk '/Apple Development/ { print $2; exit }')}"
+# The certificate the profile was made for: signing with another one (say, of
+# another team) gets the app killed at launch.
+source scripts/lib/profile-identity.sh
+identity="${BANGS_DEV_IDENTITY:-$(profile_identity "$profile")}"
 if [[ -z "$identity" ]]; then
-  echo "钥匙串里没有 Apple Development 证书（Xcode → Settings → Accounts → Manage Certificates 可以建）" >&2
+  echo "钥匙串里没有 $profile 登记的 Apple Development 证书（Xcode → Settings → Accounts → Manage Certificates 可以建，然后重新生成 profile）" >&2
   exit 1
 fi
 echo "签名身份 $identity"
