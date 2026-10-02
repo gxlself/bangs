@@ -141,6 +141,15 @@ struct SettingsButtonModifier: ViewModifier {
             .sheet(isPresented: $showSettings) {
                 SettingsView()
             }
+            #if DEBUG
+            // The demo's `-BangsTab settings` (DemoData.swift): open on the sheet, once.
+            .onAppear {
+                if DemoData.settingsPending {
+                    DemoData.settingsPending = false
+                    showSettings = true
+                }
+            }
+            #endif
     }
 }
 

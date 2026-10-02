@@ -82,6 +82,8 @@ struct ClipboardView: View {
     }
 }
 
+/// The colours are `Color.primary` / `Color.secondary`, not `.primary` / `.secondary`: the row is
+/// a button's label, and those two are relative to the button's tint, which turns the text green.
 private struct ClipRow: View {
     let clip: ClipItem
     let picture: URL?
@@ -94,19 +96,19 @@ private struct ClipRow: View {
             } else {
                 Image(systemName: symbol)
                     .font(.body)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.secondary)
                     .frame(width: 24, height: 24)
             }
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(clip.preview.isEmpty ? t("（空）", "(empty)") : clip.preview)
                     .font(.body)
-                    .foregroundStyle(.primary)
+                    .foregroundStyle(Color.primary)
                     .lineLimit(3)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 Text(footer)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.secondary)
                     .lineLimit(1)
             }
 

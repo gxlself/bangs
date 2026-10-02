@@ -74,13 +74,16 @@ struct SettingsView: View {
                     }
 
                     #if DEBUG
-                    Section(
-                        header: Text(t("开发者", "Developer")),
-                        footer: Text(environmentNote)
-                    ) {
-                        InfoRow(title: t("iCloud 容器", "iCloud container"), value: SyncModel.containerID)
-                        InfoRow(title: t("环境", "Environment"), value: "Development")
-                        InfoRow(title: t("设备 ID", "Device ID"), value: shortDeviceID)
+                    // Not in the demo's screenshots, which stand for the App Store build.
+                    if !DemoData.isOn {
+                        Section(
+                            header: Text(t("开发者", "Developer")),
+                            footer: Text(environmentNote)
+                        ) {
+                            InfoRow(title: t("iCloud 容器", "iCloud container"), value: SyncModel.containerID)
+                            InfoRow(title: t("环境", "Environment"), value: "Development")
+                            InfoRow(title: t("设备 ID", "Device ID"), value: shortDeviceID)
+                        }
                     }
                     #endif
 

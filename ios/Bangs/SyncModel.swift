@@ -109,6 +109,22 @@ final class SyncModel: ObservableObject {
     private var accountObserver: NSObjectProtocol?
 
     private init() {
+        #if DEBUG
+        // Screenshots from the simulator (DemoData.swift): sample records in memory, synced
+        // and up to date as far as the views can tell, and the real store left alone.
+        if DemoData.isOn {
+            let directory = DemoData.makeDirectory()
+            self.stateDirectory = directory
+            self.storeURL = directory.appendingPathComponent("store.json")
+            self.deviceID = DemoData.phoneID
+            self.store = DemoData.store(assetsIn: directory)
+            status = .idle
+            lastSync = Date()
+            selectedTab = DemoData.initialTab
+            publish()
+            return
+        }
+        #endif
         let fileManager = FileManager.default
         let support = (try? fileManager.url(
             for: .applicationSupportDirectory,
@@ -149,6 +165,10 @@ final class SyncModel: ObservableObject {
     func start() {
         if started { return }
         started = true
+        #if DEBUG
+        // The demo has no engine: no account, no pulls, no pushes.
+        if DemoData.isOn { return }
+        #endif
         let engine = CloudEngine(
             containerID: SyncModel.containerID,
             stateDirectory: stateDirectory,
@@ -197,6 +217,13 @@ final class SyncModel: ObservableObject {
 
     /// Pull, then push what is waiting. Also what pull-to-refresh and the Sync now button call.
     func syncNow() async {
+        #if DEBUG
+        // Pull-to-refresh and Sync now still look like they did something.
+        if DemoData.isOn {
+            lastSync = Date()
+            return
+        }
+        #endif
         start()
         guard let engine = engine else { return }
         switch status {
@@ -470,6 +497,10 @@ final class SyncModel: ObservableObject {
 
     func setNotifyWaiting(_ on: Bool) {
         notifyWaiting = on
+        #if DEBUG
+        // The demo leaves the real app's settings as they were.
+        if DemoData.isOn { return }
+        #endif
         UserDefaults.standard.set(on, forKey: SyncModel.notifyWaitingKey)
         if on {
             requestNotificationPermission()
@@ -480,6 +511,10 @@ final class SyncModel: ObservableObject {
     /// switch in Settings is turned on.
     func requestNotificationPermission() {
         guard notifyWaiting else { return }
+        #if DEBUG
+        // No system prompt over the Code tab in a screenshot; the demo never notifies anyway.
+        if DemoData.isOn { return }
+        #endif
         Task {
             let center = UNUserNotificationCenter.current()
             let settings = await center.notificationSettings()
@@ -554,6 +589,10 @@ final class SyncModel: ObservableObject {
     // MARK: Store and published lists
 
     private func saveStore() {
+        #if DEBUG
+        // The demo's edits live in memory only.
+        if DemoData.isOn { return }
+        #endif
         do {
             try store.save(to: storeURL)
         } catch {

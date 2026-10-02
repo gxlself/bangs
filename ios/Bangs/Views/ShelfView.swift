@@ -89,6 +89,8 @@ private enum ShelfFileState {
     case downloading
 }
 
+/// A button's label, so its colours are `Color.primary` / `Color.secondary`: the bare `.primary`
+/// and `.secondary` styles would follow the button's tint (see ClipRow).
 private struct ShelfRow: View {
     let item: ShelfItem
     let state: ShelfFileState
@@ -110,16 +112,16 @@ private struct ShelfRow: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(item.name)
                     .font(.body)
-                    .foregroundStyle(.primary)
+                    .foregroundStyle(Color.primary)
                     .lineLimit(2)
                 Text(details)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.secondary)
                     .lineLimit(1)
                 if let caption = caption {
                     Text(caption)
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Color.secondary)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -127,7 +129,7 @@ private struct ShelfRow: View {
             if state == .available {
                 Image(systemName: "eye")
                     .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.secondary)
                     .accessibilityHidden(true)
             } else if state == .downloading {
                 ProgressView()
