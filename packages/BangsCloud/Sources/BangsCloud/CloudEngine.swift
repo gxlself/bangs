@@ -63,7 +63,7 @@ public actor CloudEngine {
     static let recordType = "BangsRecord"
     static let zoneName = "Bangs"
     static let subscriptionID = "bangs-zone"
-    static let knownKinds: Set<String> = ["todo", "session", "clip", "shelf"]
+    static let knownKinds: Set<String> = ["todo", "session", "clip", "shelf", "device"]
     /// Records per request. Bodies go up to 64 KB, and a request has a size limit.
     static let maxBatch = 25
     static let maxConflictRounds = 3

@@ -168,6 +168,17 @@ final class RecordStoreTests: XCTestCase {
         XCTAssertEqual(store.purgeTombstones(now: 1_000, ttlMs: 100), 0)
     }
 
+    func testPurgeKeepsEachKindsTombstonesForItsOwnTime() {
+        var store = RecordStore(records: [
+            "todo:a": SyncRecord(kind: "todo", id: "a", updatedAt: 100, device: mac, deleted: true, body: .object([:])),
+            "clip:b": SyncRecord(kind: "clip", id: "b", updatedAt: 100, device: mac, deleted: true, body: .object([:])),
+        ])
+        let removed = store.purgeTombstones(now: 1_000, ttlFor: { kind in kind == "todo" ? 5_000 : 500 })
+        XCTAssertEqual(removed, 1)
+        XCTAssertNotNil(store.records["todo:a"])
+        XCTAssertNil(store.records["clip:b"])
+    }
+
     func testStoreFileRoundTripKeepsInflightInTheOutbox() throws {
         var store = RecordStore()
         store.localUpsert(kind: "todo", id: "a", body: todoBody("a"), now: 100, device: phone)

@@ -14,6 +14,7 @@ pub const TODO: &str = "todo";
 pub const SESSION: &str = "session";
 pub const CLIP: &str = "clip";
 pub const SHELF: &str = "shelf";
+pub const DEVICE: &str = "device";
 
 /// One synced record, in the wire format of docs/sync.md.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

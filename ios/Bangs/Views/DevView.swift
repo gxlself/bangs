@@ -22,11 +22,17 @@ struct DevView: View {
                     await model.syncNow()
                 }
             } else {
-                List {
-                    ForEach(SessionGroup.groups(from: model.sessions)) { group in
-                        Section(header: Text(group.host)) {
-                            ForEach(group.items) { session in
-                                SessionRow(session: session)
+                // Redrawn every minute, so a Mac that stopped sending heartbeats turns offline
+                // without anything else happening.
+                TimelineView(.everyMinute) { context in
+                    List {
+                        ForEach(SessionGroup.groups(from: model.sessions)) { group in
+                            let online = model.isOnline(group.deviceID, at: context.date)
+                            Section(header: GroupHeader(host: group.host, online: online)) {
+                                ForEach(group.items) { session in
+                                    SessionRow(session: session)
+                                        .opacity(online ? 1 : 0.45)
+                                }
                             }
                         }
                     }
@@ -43,6 +49,24 @@ struct DevView: View {
             model.requestNotificationPermission()
         }
         .settingsButton()
+    }
+}
+
+/// The Mac's name, and "offline" when it has not been heard from: asleep, or Bangs quit, so
+/// what its sessions say may be out of date.
+private struct GroupHeader: View {
+    let host: String
+    let online: Bool
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(host.isEmpty ? t("未知设备", "Unknown device") : host)
+            if !online {
+                Text(t("· 离线，状态可能已过期", "· offline, may be out of date"))
+                    .foregroundStyle(.secondary)
+                    .textCase(nil)
+            }
+        }
     }
 }
 

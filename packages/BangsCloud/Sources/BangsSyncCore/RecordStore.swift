@@ -180,10 +180,17 @@ public struct RecordStore: Codable, Equatable, Sendable {
     /// Drops tombstones older than `ttlMs` that are not waiting to be pushed. Returns how many.
     @discardableResult
     public mutating func purgeTombstones(now: Int64, ttlMs: Int64) -> Int {
+        return purgeTombstones(now: now, ttlFor: { _ in ttlMs })
+    }
+
+    /// Drops tombstones older than `ttlFor(kind)` that are not waiting to be pushed: a to-do's
+    /// has to outlive a device that was away for weeks, a mirrored clip's does not.
+    @discardableResult
+    public mutating func purgeTombstones(now: Int64, ttlFor: (String) -> Int64) -> Int {
         var removed = 0
         for (key, record) in records {
             guard record.deleted, outbox[key] == nil, inflight[key] == nil else { continue }
-            if now - record.updatedAt > ttlMs {
+            if now - record.updatedAt > ttlFor(record.kind) {
                 records[key] = nil
                 removed += 1
             }

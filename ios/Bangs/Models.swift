@@ -104,6 +104,11 @@ enum SessionStatus: String {
 
 struct SessionItem: Identifiable, Equatable {
     let id: String
+    /// The short id of the Mac it runs on: the record id is `<device8>-<session id>`.
+    var deviceID: String {
+        let recordID = id.hasPrefix("session:") ? String(id.dropFirst("session:".count)) : id
+        return String(recordID.prefix(while: { $0 != "-" }))
+    }
     let agent: String
     let name: String
     let project: String
@@ -159,19 +164,21 @@ struct SessionItem: Identifiable, Equatable {
 }
 
 struct SessionGroup: Identifiable {
+    let deviceID: String
     let host: String
     let items: [SessionItem]
-    var id: String { host }
+    var id: String { deviceID }
 
     /// Sessions grouped by Mac; a Mac with something waiting comes first.
     static func groups(from sessions: [SessionItem]) -> [SessionGroup] {
-        var byHost: [String: [SessionItem]] = [:]
+        var byDevice: [String: [SessionItem]] = [:]
         for session in sessions {
-            byHost[session.host, default: []].append(session)
+            byDevice[session.deviceID, default: []].append(session)
         }
         var groups: [SessionGroup] = []
-        for (host, items) in byHost {
-            groups.append(SessionGroup(host: host, items: items.sorted(by: SessionItem.isOrderedBefore)))
+        for (deviceID, items) in byDevice {
+            let sorted = items.sorted(by: SessionItem.isOrderedBefore)
+            groups.append(SessionGroup(deviceID: deviceID, host: sorted.first?.host ?? "", items: sorted))
         }
         groups.sort { lhs, rhs in
             let l = lhs.items.first?.status.rank ?? 3

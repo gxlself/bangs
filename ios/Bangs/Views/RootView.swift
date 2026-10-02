@@ -48,8 +48,8 @@ struct RootView: View {
         }
     }
 
-    /// Sessions waiting for an answer, on the Dev tab's badge.
+    /// Sessions waiting for an answer on a Mac that is there, on the Dev tab's badge.
     private var waitingCount: Int {
-        model.sessions.filter { $0.status == .waiting }.count
+        model.sessions.filter { $0.status == .waiting && model.isOnline($0.deviceID) }.count
     }
 }

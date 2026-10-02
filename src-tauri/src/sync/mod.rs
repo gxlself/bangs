@@ -30,7 +30,7 @@ use crate::dev::AgentSession;
 use crate::i18n::t;
 use crate::settings::{self, SettingsState};
 use crate::todos::Todo;
-use ledger::{clean_id, fnv_hex, Desired, Ledger, CLIP, SESSION, SHELF, TODO};
+use ledger::{clean_id, fnv_hex, Desired, Ledger, CLIP, DEVICE, SESSION, SHELF, TODO};
 pub use ledger::Record;
 
 /// How many clipboard entries the phone gets: the panel's first page, which is
@@ -55,6 +55,10 @@ const PULL_EVERY: u64 = 20;
 /// Seconds between attempts to reconnect while there is no usable account:
 /// signing in to iCloud later should be enough, no restart.
 const RECONNECT_EVERY: u64 = 300;
+/// Seconds between heartbeats: the phone treats a Mac it has not heard from in
+/// a while (asleep, quit) as offline instead of believing its sessions are
+/// still running.
+const HEARTBEAT_EVERY: u64 = 600;
 /// How long the queue waits for the first pull before going out anyway.
 const PULL_GRACE_MS: u64 = 15_000;
 const DEFAULT_RETRY_SECS: u64 = 30;
@@ -353,6 +357,10 @@ fn pump(app: AppHandle, generation: u64) {
         };
         if ready && tick % PULL_EVERY == 0 {
             cloud::pull();
+        }
+        // The first one right after start-up, then every ten minutes.
+        if tick % HEARTBEAT_EVERY == 2 {
+            heartbeat(&app);
         }
         if !ready && tick % RECONNECT_EVERY == 0 {
             if let Some(dir) = dir {
@@ -743,6 +751,16 @@ fn reconcile_shelf(app: &AppHandle) {
         })
         .collect();
     reconcile(app, SHELF, desired);
+}
+
+/// "This Mac is here": its name and the time, so the phone can tell a Mac that
+/// went to sleep or quit Bangs from one whose sessions are just quiet.
+fn heartbeat(app: &AppHandle) {
+    let Some((device, host)) = identity(app) else { return };
+    let now = now_ms();
+    change(app, |ledger| {
+        ledger.local_upsert(DEVICE, &device, json!({ "host": host, "seenAt": now, "platform": "macOS" }), None, now).is_some()
+    });
 }
 
 // --------------------------------------------------------------- helpers

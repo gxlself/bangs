@@ -5,7 +5,14 @@ import UserNotifications
 import BangsSyncCore
 import BangsCloud
 
-private let tombstoneTTLms: Int64 = 90 * 24 * 60 * 60 * 1000
+private let dayMs: Int64 = 24 * 60 * 60 * 1000
+/// How long a tombstone is kept: a to-do must not come back from a device that was away for
+/// weeks; the mirrored kinds are only ever written by the Mac.
+private func tombstoneTTL(_ kind: String) -> Int64 {
+    return kind == "todo" ? 90 * dayMs : dayMs
+}
+/// A Mac whose heartbeat is older than this is asleep or has quit Bangs.
+private let offlineAfterMs: Int64 = 20 * 60 * 1000
 private let todoMaxLength = 200
 
 private func nowMillis() -> Int64 {
@@ -52,6 +59,8 @@ final class SyncModel: ObservableObject {
     @Published private(set) var sessions: [SessionItem] = []
     @Published private(set) var clips: [ClipItem] = []
     @Published private(set) var shelf: [ShelfItem] = []
+    /// Short device id of each Mac → when it last said it was there (its heartbeat).
+    @Published private(set) var deviceSeen: [String: Int64] = [:]
     @Published private(set) var status: CloudStatus = .starting
     @Published private(set) var lastSync: Date? = nil
     @Published var selectedTab: AppTab = .todo
@@ -108,7 +117,7 @@ final class SyncModel: ObservableObject {
             // No records on disk, so a saved change token would skip everything it covers.
             try? fileManager.removeItem(at: tokenURL)
         }
-        loaded.purgeTombstones(now: nowMillis(), ttlMs: tombstoneTTLms)
+        loaded.purgeTombstones(now: nowMillis(), ttlFor: tombstoneTTL)
 
         self.stateDirectory = directory
         self.storeURL = url
@@ -403,6 +412,16 @@ final class SyncModel: ObservableObject {
         }
     }
 
+    // MARK: Macs
+
+    /// Whether a Mac was heard from lately. One that never sent a heartbeat (an older Bangs)
+    /// counts as there.
+    func isOnline(_ deviceID: String, at date: Date = Date()) -> Bool {
+        guard let seen = deviceSeen[deviceID] else { return true }
+        let now = Int64(date.timeIntervalSince1970 * 1000)
+        return now - seen < offlineAfterMs
+    }
+
     // MARK: Notifications
 
     func setNotifyWaiting(_ on: Bool) {
@@ -502,5 +521,12 @@ final class SyncModel: ObservableObject {
         shelf = store.live(kind: "shelf")
             .compactMap { ShelfItem(record: $0) }
             .sorted(by: ShelfItem.isOrderedBefore)
+        var seen: [String: Int64] = [:]
+        for record in store.live(kind: "device") {
+            if let at = record.body["seenAt"]?.int64Value {
+                seen[record.id] = at
+            }
+        }
+        deviceSeen = seen
     }
 }
