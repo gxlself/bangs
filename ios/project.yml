@@ -1,0 +1,70 @@
+# XcodeGen spec: `cd ios && xcodegen generate` writes Bangs.xcodeproj (git-ignored).
+# Info.plist is generated from `info:` below, into Bangs/Info.plist (also git-ignored).
+name: Bangs
+
+options:
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+
+# Project-level settings. Bangs.xcconfig (target level, below) is applied on top of these,
+# so a Local.xcconfig can override the team and the bundle id.
+settings:
+  base:
+    DEVELOPMENT_TEAM: W8L8ZJ3N2P
+    PRODUCT_BUNDLE_IDENTIFIER: com.gxlself.bangs.ios
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+
+packages:
+  BangsCloud:
+    path: ../packages/BangsCloud
+
+targets:
+  Bangs:
+    type: application
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: Bangs
+    dependencies:
+      - package: BangsCloud
+        product: BangsCloud
+      - package: BangsCloud
+        product: BangsSyncCore
+    configFiles:
+      Debug: Bangs.xcconfig
+      Release: Bangs.xcconfig
+    settings:
+      base:
+        CODE_SIGN_ENTITLEMENTS: Bangs/Bangs.entitlements
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        TARGETED_DEVICE_FAMILY: "1,2"
+    attributes:
+      SystemCapabilities:
+        com.apple.iCloud:
+          enabled: 1
+        com.apple.Push:
+          enabled: 1
+        com.apple.BackgroundModes:
+          enabled: 1
+    info:
+      path: Bangs/Info.plist
+      properties:
+        CFBundleDisplayName: Bangs
+        UIBackgroundModes:
+          - remote-notification
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        ITSAppUsesNonExemptEncryption: false

@@ -1,0 +1,4 @@
+// Per-developer overrides, loaded after the settings in project.yml.
+// Copy Local.xcconfig.sample to Local.xcconfig (git-ignored) to change the team or bundle id.
+// The "?" makes the include optional, so a missing Local.xcconfig is fine.
+#include? "Local.xcconfig"

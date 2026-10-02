@@ -38,7 +38,7 @@ const CLIP_WINDOW: usize = 30;
 /// The longest clipboard text that is sent whole.
 const CLIP_CHARS: usize = 8_000;
 /// Bigger files stay on the Mac; the phone still sees that they exist.
-const SHELF_FILE_BYTES: u64 = 25 * 1024 * 1024;
+const SHELF_FILE_BYTES: u64 = 25_000_000;
 const TOMBSTONE_TTL_MS: u64 = 90 * 24 * 60 * 60 * 1000;
 /// Seconds between pulls; there is no push notification on this side.
 const PULL_EVERY: u64 = 60;

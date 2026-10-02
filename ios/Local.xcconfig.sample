@@ -1,0 +1,9 @@
+// cp Local.xcconfig.sample Local.xcconfig
+// Local.xcconfig is git-ignored. Uncomment and edit what you need, then run `xcodegen generate` again.
+//
+// Your own Apple Developer team (the 10-character Team ID):
+// DEVELOPMENT_TEAM = ABCDE12345
+//
+// A different bundle id. The App ID must have iCloud (CloudKit) and Push Notifications enabled,
+// and the iCloud container in Bangs/Bangs.entitlements must be one your team owns.
+// PRODUCT_BUNDLE_IDENTIFIER = com.example.bangs.ios

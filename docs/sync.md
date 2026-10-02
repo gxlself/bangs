@@ -25,7 +25,7 @@ Windows 版没有 iCloud，同步保持关闭，行为和以前完全一样。
 | `todo` | 双向 | Mac 生成的 id，或 iOS 生成的 UUID | 勾掉 = 删除（和 Bangs 现有行为一致），删除以墓碑记录传播 |
 | `session` | Mac → iOS | `<device8>-<会话 id>` | Claude Code / Codex 会话的忙碌、等待、空闲；Mac 上消失的会话写墓碑 |
 | `clip` | Mac → iOS | `<device8>-<内容哈希>` | 最近 30 条剪贴板；文本带全文（≤ 8000 字符），图片/文件只有预览文字 |
-| `shelf` | Mac → iOS | `<device8>-<路径哈希>` | 文件架；≤ 25 MB 的文件作为 CKAsset 上传，更大的只同步元数据 |
+| `shelf` | Mac → iOS | `<device8>-<路径哈希>` | 文件架；≤ 25 MB（25,000,000 字节，十进制）的文件作为 CKAsset 上传，更大的只同步元数据 |
 
 - `device8` 是设备 id（随机 UUID，去掉连字符取前 8 位小写十六进制）。镜像类 kind 的 id 带设备前缀，
   所以两台 Mac 不会互相写墓碑；镜像只会清理**本设备**写过的记录。
@@ -142,6 +142,8 @@ void    bangs_cloud_stop(void);
 - **必须先调 `bangs_cloud_supported`**。进程的签名里没有 `com.apple.developer.icloud-services` 时，
   创建 `CKContainer` 会直接崩溃、捕获不了——`pnpm tauri dev` 起的未签名二进制就是这种情况。
   检查方法是 `SecTaskCopyValueForEntitlement`（Paste 的 `ICloudCapability.swift` 同一个做法）。
+  比 Paste 更严一点：`icloud-services` 里要有 `CloudKit`，`icloud-container-identifiers` 里要有
+  `iCloud.com.gxlself.bangs`，因为打开一个签名里没列出的容器同样会崩。
 - `state_dir` 用来放变更令牌（`token.bin`）和下载的资源（`assets/<recordName>`）。
 - `callback` 可能在任意线程被调用；`event_json` 只在调用期间有效，需要自行拷贝。事件：
 
@@ -184,6 +186,18 @@ TestFlight / App Store / Developer ID 的包读写 Production，两边互相看�
    放到 `src-tauri/icloud/`，文件名见该目录的 README。profile 不进 git。
 
 只有 iCloud 能力需要 profile；没有 profile 时 Bangs 照常运行，只是同步开关会提示「这个版本没有 iCloud 权限」。
+
+## 已知限制
+
+- **没有在 Mac 和真机上跑过。** 这一套是在没有 Swift 工具链的环境里写的：Rust 部分有测试并在 macOS / Windows /
+  Linux 三个目标上通过了类型检查，Swift 部分（尤其是 `CloudEngine.swift` 和 `Bridge.swift`）从没编译过，
+  第一次在 Mac 上 `swift test` 和 Xcode Run 时很可能要修几处编译错误。合并规则有共用的测试向量，
+  CloudKit 那一层只能靠真机联调。
+- **App 图标是透明边距的圆角方块**（直接用了桌面端的图标）。开发运行没问题，但 TestFlight / App Store
+  会拒收带 alpha 通道的图标，上架前要换一张不透明、铺满的 1024×1024。
+- 关闭同步只是停止收发，iCloud 里已经同步的记录保留，手机上还看得到最后的状态。
+- iOS 端收到记录和保存变更令牌之间有几毫秒的间隙：恰好在这时被杀，会漏掉那一批记录。
+  `store.json` 丢失或损坏时 iOS 端会连令牌一起删掉重新全量拉取，所以数据不会就此不一致，只是这个窗口本身没补。
 
 ## 不在第一阶段里的东西
 
