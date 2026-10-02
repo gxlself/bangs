@@ -6,14 +6,21 @@ struct DevView: View {
     var body: some View {
         Group {
             if model.sessions.isEmpty {
-                EmptyStateView(
-                    symbol: "terminal",
-                    title: t("还没有会话", "No sessions yet"),
-                    message: t(
-                        "Mac 上的 Bangs 需要打开 iCloud 同步，Claude Code / Codex 的会话才会出现在这里。",
-                        "Bangs on your Mac needs iCloud sync turned on before Claude Code and Codex sessions show up here."
+                // Scrollable, so pull-to-refresh works before there is anything to show.
+                ScrollView {
+                    EmptyStateView(
+                        symbol: "terminal",
+                        title: t("还没有会话", "No sessions yet"),
+                        message: t(
+                            "Mac 上的 Bangs 需要打开 iCloud 同步，Claude Code / Codex 的会话才会出现在这里。",
+                            "Bangs on your Mac needs iCloud sync turned on before Claude Code and Codex sessions show up here."
+                        )
                     )
-                )
+                        .padding(.top, 96)
+                }
+                .refreshable {
+                    await model.syncNow()
+                }
             } else {
                 List {
                     ForEach(SessionGroup.groups(from: model.sessions)) { group in

@@ -55,6 +55,9 @@ targets:
       path: Bangs/Info.plist
       properties:
         CFBundleDisplayName: Bangs
+        # XcodeGen writes 1.0 / 1 here unless told otherwise; follow the build settings above.
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         UIBackgroundModes:
           - remote-notification
         UILaunchScreen: {}

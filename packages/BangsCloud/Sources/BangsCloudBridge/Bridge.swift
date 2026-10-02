@@ -122,6 +122,20 @@ private final class BridgeState: @unchecked Sendable {
     private var engine: CloudEngine?
     private var callback: BangsEventCallback?
     private var accountObserver: NSObjectProtocol?
+    /// The last call handed to the engine, so the next one waits for it: Rust's "pull, then
+    /// push what is queued" reaches the engine in that order.
+    private var tail: Task<Void, Never>?
+
+    /// Runs `work` after everything enqueued before it.
+    func enqueue(_ work: @escaping @Sendable () async -> Void) {
+        lock.lock()
+        defer { lock.unlock() }
+        let previous = tail
+        tail = Task {
+            await previous?.value
+            await work()
+        }
+    }
 
     /// Starts the engine again whenever the iCloud account changes, once per process.
     func observeAccountChanges() {
@@ -133,8 +147,8 @@ private final class BridgeState: @unchecked Sendable {
             object: nil,
             queue: nil
         ) { [weak self] _ in
-            guard let engine = self?.currentEngine() else { return }
-            Task { await engine.start() }
+            guard let self = self, let engine = self.currentEngine() else { return }
+            self.enqueue { await engine.accountChanged() }
         }
     }
 
@@ -225,7 +239,7 @@ public func bangsCloudStart(
         Task { await old.stop() }
     }
     bridgeState.observeAccountChanges()
-    Task { await engine.start() }
+    bridgeState.enqueue { await engine.start() }
 }
 
 @_cdecl("bangs_cloud_push")
@@ -245,7 +259,7 @@ public func bangsCloudPush(_ recordsJSON: UnsafePointer<CChar>) {
         reportError("push: iCloud sync is not running")
         return
     }
-    Task { await engine.push(records) }
+    bridgeState.enqueue { await engine.push(records) }
 }
 
 @_cdecl("bangs_cloud_pull")
@@ -254,7 +268,7 @@ public func bangsCloudPull() {
         reportError("pull: iCloud sync is not running")
         return
     }
-    Task { await engine.pull() }
+    bridgeState.enqueue { await engine.pull() }
 }
 
 @_cdecl("bangs_cloud_stop")

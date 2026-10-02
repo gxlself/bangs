@@ -211,9 +211,12 @@ TestFlight / App Store / Developer ID 的包读写 Production，两边互相看�
 ## 已知限制
 
 - **没有在 Mac 和真机上跑过。** 这一套是在没有 Swift 工具链的环境里写的：Rust 部分有测试并在 macOS / Windows /
-  Linux 三个目标上通过了类型检查，Swift 部分（尤其是 `CloudEngine.swift` 和 `Bridge.swift`）从没编译过，
-  第一次在 Mac 上 `swift test` 和 Xcode Run 时很可能要修几处编译错误。合并规则有共用的测试向量，
-  CloudKit 那一层只能靠真机联调。
+  Linux 三个目标上通过了类型检查；Swift 部分没有真正编译过，只做了语法检查（tree-sitter），
+  并经过一轮对照 iOS SDK 接口文件逐行核对 API 签名的审查，没有找到编译错误——但第一次在 Mac 上
+  `swift test` 和 Xcode Run 时仍可能要修小问题。合并规则有共用的测试向量，CloudKit 那一层只能靠真机联调。
+- Mac 会把自己上传的文件架文件在下一次拉取时再下载一次（下载完马上丢掉，不占磁盘）。可以用 `desiredKeys`
+  不取 `asset` 来省掉，但加密的 `body` 在指定 `desiredKeys` 时是否照样返回没验证过——取不回来，手机加的待办
+  就会被静默丢掉，所以先不冒这个险。真机上确认之后可以改 `CloudEngine.fetchPages`。
 - iOS 图标是从桌面端图标生成的（圆角方块放大铺满、四角补渐变、去掉透明通道），能过 App Store 的检查，
   但设计上值得找人出一张正式的。
 - 每次更新已有记录都要两个请求：引擎每次都新建 `CKRecord`，第一次必然撞 `serverRecordChanged`，

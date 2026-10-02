@@ -7,14 +7,21 @@ struct ShelfView: View {
     var body: some View {
         Group {
             if model.shelf.isEmpty {
-                EmptyStateView(
-                    symbol: "tray.full",
-                    title: t("文件架是空的", "The shelf is empty"),
-                    message: t(
-                        "放进 Mac 文件架的文件会出现在这里，25 MB 以内的可以直接预览。Mac 上的 Bangs 需要打开 iCloud 同步。",
-                        "Files you put on the shelf on your Mac show up here; files up to 25 MB can be previewed. Bangs on your Mac needs iCloud sync turned on."
+                // Scrollable, so pull-to-refresh works before there is anything to show.
+                ScrollView {
+                    EmptyStateView(
+                        symbol: "tray.full",
+                        title: t("文件架是空的", "The shelf is empty"),
+                        message: t(
+                            "放进 Mac 文件架的文件会出现在这里，25 MB 以内的可以直接预览。Mac 上的 Bangs 需要打开 iCloud 同步。",
+                            "Files you put on the shelf on your Mac show up here; files up to 25 MB can be previewed. Bangs on your Mac needs iCloud sync turned on."
+                        )
                     )
-                )
+                        .padding(.top, 96)
+                }
+                .refreshable {
+                    await model.syncNow()
+                }
             } else {
                 List {
                     ForEach(model.shelf) { item in

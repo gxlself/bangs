@@ -115,7 +115,7 @@ final class SyncModel: ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor in
                 guard let engine = self?.engine else { return }
-                await engine.start()
+                await engine.accountChanged()
             }
         }
         Task {
@@ -170,6 +170,9 @@ final class SyncModel: ObservableObject {
         case .starting, .noAccount, .restricted, .unavailable:
             await engine.start()
         }
+        if !store.outbox.isEmpty {
+            pushAfterPull = true
+        }
         await engine.pull()
         await Task.yield()
     }
@@ -177,6 +180,10 @@ final class SyncModel: ObservableObject {
     private func pollOnce() async {
         switch status {
         case .ready, .idle, .error:
+            // Leftovers (a push that failed, a reset's re-queued lines) go out after this pull.
+            if !store.outbox.isEmpty {
+                pushAfterPull = true
+            }
             await engine?.pull()
         default:
             break
@@ -279,6 +286,8 @@ final class SyncModel: ObservableObject {
             }
             saveStore()
             publish()
+            // A reset comes in the middle of a pull or before `ready`; the queue goes out after.
+            pushAfterPull = true
         case .failed(let keys, let message, let retryAfter):
             print("[sync] push failed: \(message)")
             store.restoreInflight(keys: keys)

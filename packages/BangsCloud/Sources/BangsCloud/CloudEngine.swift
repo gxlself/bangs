@@ -36,9 +36,11 @@ public enum CloudEvent: Sendable {
 }
 
 /// Every `pull()` and `push()` ends with exactly one status event: `syncing` when it starts,
-/// then `idle` on success or `error` on failure. The records / pushed / rejected / failed
-/// events of a call come before its closing status. `start()` emits `starting`, then `ready`
-/// (or the reason it cannot be ready).
+/// then `idle` on success, or `noAccount` / `error` on failure. The records / pushed /
+/// rejected / failed events of a call come before its closing status. `start()` emits
+/// `starting`, then `ready` (or the reason it cannot be ready). `start()`, `pull()` and
+/// `push()` run one at a time, in the order they reach the actor. After `stop()` the engine is
+/// done for good: no events, no token writes; make a new one to start again.
 public actor CloudEngine {
     /// File name of the saved change token inside the state directory.
     public static let tokenFileName = "token.bin"
@@ -51,7 +53,8 @@ public actor CloudEngine {
     static let zoneName = "Bangs"
     static let subscriptionID = "bangs-zone"
     static let knownKinds: Set<String> = ["todo", "session", "clip", "shelf"]
-    static let maxBatch = 100
+    /// Records per request. Bodies go up to 64 KB, and a request has a size limit.
+    static let maxBatch = 25
     static let maxConflictRounds = 3
 
     private let container: CKContainer
@@ -65,6 +68,9 @@ public actor CloudEngine {
     private var tokenLoaded = false
     private var setupDone = false
     private var stopped = false
+    /// Account status and user the last `start()` saw, so a CKAccountChanged that changes
+    /// nothing does not restart anything.
+    private var lastAccountKey: String?
     /// The zone went missing; the next successful setup reports `reset("zone")`.
     private var zoneLost = false
 
@@ -83,7 +89,7 @@ public actor CloudEngine {
         let container = CKContainer(identifier: containerID)
         self.container = container
         self.database = container.privateCloudDatabase
-        self.zoneID = CKRecordZone.ID(zoneName: "Bangs", ownerName: CKCurrentUserDefaultName)
+        self.zoneID = CKRecordZone.ID(zoneName: CloudEngine.zoneName, ownerName: CKCurrentUserDefaultName)
         self.stateDirectory = stateDirectory
         self.keepAssets = keepAssets
         self.onEvent = onEvent
@@ -94,10 +100,13 @@ public actor CloudEngine {
     /// Checks the iCloud account, creates the zone and its subscription, then reports `ready`.
     /// Safe to call again (for instance when the app comes back to the foreground).
     public func start() async {
-        stopped = false
+        await acquire()
+        defer { release() }
+        if stopped { return }
         emit(.status(.starting))
         do {
             let account = try await container.accountStatus()
+            lastAccountKey = "\(account.rawValue):"
             switch account {
             case .available:
                 break
@@ -126,8 +135,9 @@ public actor CloudEngine {
     /// A different iCloud account than last time: the saved token and everything this device
     /// thinks is in the cloud belong to the old one.
     private func checkAccount() async {
-        guard let recordID = try? await container.userRecordID() else { return }
+        guard let recordID = try? await container.userRecordID(), !stopped else { return }
         let current = recordID.recordName
+        lastAccountKey = "\(CKAccountStatus.available.rawValue):\(current)"
         let url = stateDirectory.appendingPathComponent(CloudEngine.accountFileName)
         let saved = (try? String(contentsOf: url, encoding: .utf8))?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -214,7 +224,22 @@ public actor CloudEngine {
         emit(.status(firstFailure ?? .idle))
     }
 
-    /// Stops reporting; queued and later calls do nothing. `start()` revives the engine.
+    /// The system says the iCloud account changed. Starts over only when it really did: the
+    /// notification also comes on launch and wake with nothing changed, and a needless restart
+    /// would make the caller send everything in flight again.
+    public func accountChanged() async {
+        if stopped { return }
+        let status = (try? await container.accountStatus())?.rawValue ?? -1
+        var key = "\(status):"
+        if status == CKAccountStatus.available.rawValue {
+            let user = try? await container.userRecordID()
+            key += user?.recordName ?? ""
+        }
+        if key == lastAccountKey { return }
+        await start()
+    }
+
+    /// Stops for good: queued and later calls do nothing, nothing is emitted or saved.
     public func stop() {
         stopped = true
     }
@@ -589,6 +614,7 @@ public actor CloudEngine {
     }
 
     private func saveToken() {
+        if stopped { return }
         let fileManager = FileManager.default
         guard let token = changeToken else {
             try? fileManager.removeItem(at: tokenURL)
@@ -607,6 +633,7 @@ public actor CloudEngine {
     // MARK: Helpers
 
     private func emit(_ event: CloudEvent) {
+        if stopped { return }
         onEvent(event)
     }
 

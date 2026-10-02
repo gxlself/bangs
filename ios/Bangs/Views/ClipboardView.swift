@@ -9,14 +9,21 @@ struct ClipboardView: View {
     var body: some View {
         Group {
             if model.clips.isEmpty {
-                EmptyStateView(
-                    symbol: "doc.on.clipboard",
-                    title: t("剪贴板是空的", "Clipboard is empty"),
-                    message: t(
-                        "在 Mac 上复制的内容会同步到这里，点一下就能拷贝到手机。Mac 上的 Bangs 需要打开 iCloud 同步。",
-                        "Things you copy on your Mac show up here; tap one to copy it to this phone. Bangs on your Mac needs iCloud sync turned on."
+                // Scrollable, so pull-to-refresh works before there is anything to show.
+                ScrollView {
+                    EmptyStateView(
+                        symbol: "doc.on.clipboard",
+                        title: t("剪贴板是空的", "Clipboard is empty"),
+                        message: t(
+                            "在 Mac 上复制的内容会同步到这里，点一下就能拷贝到手机。Mac 上的 Bangs 需要打开 iCloud 同步。",
+                            "Things you copy on your Mac show up here; tap one to copy it to this phone. Bangs on your Mac needs iCloud sync turned on."
+                        )
                     )
-                )
+                        .padding(.top, 96)
+                }
+                .refreshable {
+                    await model.syncNow()
+                }
             } else {
                 List {
                     ForEach(model.clips) { clip in
