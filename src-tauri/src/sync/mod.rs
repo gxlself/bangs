@@ -39,10 +39,22 @@ pub use ledger::Record;
 const CLIP_WINDOW: usize = crate::clipboard::PAGE;
 /// The longest clipboard text that is sent whole.
 const CLIP_CHARS: usize = 8_000;
-/// A copied picture goes to the phone as a JPEG of at most this many bytes. It
-/// travels inside the record's end-to-end encrypted values, which share the
-/// record's 1 MB limit; one that cannot be made this small stays on the Mac.
+/// A copied picture goes to the phone as at most this many bytes. It travels
+/// inside the record's end-to-end encrypted values, which share the record's
+/// 1 MB limit; one that cannot be made this small stays on the Mac.
 const CLIP_IMAGE_BYTES: u64 = 900_000;
+/// A picture this small that the phone opens goes as it is: an icon or a small
+/// crop is not worth a re-encode, nor the little it would save.
+const CLIP_IMAGE_SMALL: u64 = 200_000;
+/// The steps a copied picture is made smaller in, (side, quality), until it
+/// fits: HEIC, the way Paste keeps its own store small — a PNG screenshot comes
+/// out a quarter of its size or less, the text still sharp, transparency kept.
+/// The side is that of a square of the same area: a long scrolling screenshot
+/// keeps a readable width instead of being squeezed to fit 2048 pixels tall.
+const CLIP_HEIC_STEPS: [(u32, u8); 4] = [(2048, 80), (1600, 70), (1024, 60), (640, 50)];
+/// The same for a Mac that cannot write HEIC (an older Intel one without a
+/// HEVC encoder).
+const CLIP_JPEG_STEPS: [(u32, u8); 3] = [(1600, 75), (1024, 60), (640, 50)];
 /// Bigger files stay on the Mac; the phone still sees that they exist.
 const SHELF_FILE_BYTES: u64 = 25_000_000;
 const DAY_MS: u64 = 24 * 60 * 60 * 1000;
@@ -713,9 +725,8 @@ fn reconcile_clips(app: &AppHandle) {
 static CLIP_IMAGES: Mutex<()> = Mutex::new(());
 
 /// The picture the phone gets for a copied image, made once and kept in
-/// `<sync dir>/clips/<record id>.img` while the entry is in the window: the
-/// original when it is small enough and in a format the phone opens (a
-/// screenshot of text stays sharp), otherwise a JPEG made small enough.
+/// `<sync dir>/clips/<record id>.img` while the entry is in the window: see
+/// `PicturePlan`.
 fn clip_image(app: &AppHandle, clip_id: i64, record_id: &str) -> Option<String> {
     let dir = sync_dir(app)?.join("clips");
     let picture = dir.join(format!("{record_id}.img"));
@@ -725,13 +736,21 @@ fn clip_image(app: &AppHandle, clip_id: i64, record_id: &str) -> Option<String> 
         // Made under another name and renamed: a half-written file would
         // otherwise go out as it is, for as long as the entry is in the window.
         let part = dir.join(format!("{record_id}.part"));
-        let made = if bytes.len() as u64 <= CLIP_IMAGE_BYTES && phone_opens(&bytes) {
+        let len = bytes.len() as u64;
+        let plan = PicturePlan::for_picture(len, phone_opens(&bytes), is_heic(&bytes));
+        let shrunk = match plan {
+            PicturePlan::AsItIs => None,
+            PicturePlan::Shrink { .. } => {
+                let raw = dir.join(format!("{record_id}.raw"));
+                let shrunk = if std::fs::write(&raw, &bytes).is_ok() { shrink(&raw, &part) } else { None };
+                let _ = std::fs::remove_file(&raw);
+                shrunk
+            }
+        };
+        let made = if plan.keeps_original(len, shrunk) {
             std::fs::write(&part, &bytes).is_ok()
         } else {
-            let raw = dir.join(format!("{record_id}.raw"));
-            let made = std::fs::write(&raw, &bytes).is_ok() && shrink_to_jpeg(&raw, &part);
-            let _ = std::fs::remove_file(&raw);
-            made
+            shrunk.is_some()
         };
         if !made || std::fs::rename(&part, &picture).is_err() {
             let _ = std::fs::remove_file(&part);
@@ -741,6 +760,89 @@ fn clip_image(app: &AppHandle, clip_id: i64, record_id: &str) -> Option<String> 
     Some(picture.to_string_lossy().into_owned())
 }
 
+/// What becomes of a copied picture on its way to the phone, the way Paste
+/// keeps its own store small (its ImageCompressor): re-encoded to HEIC unless
+/// it is small already, and never larger than it was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PicturePlan {
+    /// Small and in a format the phone opens, or a HEIC that fits (already as
+    /// compact as a re-encode would make it): sent byte for byte.
+    AsItIs,
+    /// Made smaller with `sips`. `or_original`: the original would do too (the
+    /// phone opens it, it fits), so it goes instead of a picture that came out
+    /// no smaller than it — or of none at all.
+    Shrink { or_original: bool },
+}
+
+impl PicturePlan {
+    /// The plan for a picture of `len` bytes; `opens`: in a format the phone
+    /// opens as it is; `heic`: a HEIC already.
+    fn for_picture(len: u64, opens: bool, heic: bool) -> Self {
+        if opens && (len <= CLIP_IMAGE_SMALL || heic && len <= CLIP_IMAGE_BYTES) {
+            PicturePlan::AsItIs
+        } else {
+            PicturePlan::Shrink { or_original: opens && len <= CLIP_IMAGE_BYTES }
+        }
+    }
+
+    /// Whether the original of `len` bytes goes after all, once shrinking made
+    /// a picture of `shrunk` bytes (`None`: nothing that fits).
+    fn keeps_original(self, len: u64, shrunk: Option<u64>) -> bool {
+        match self {
+            PicturePlan::AsItIs => true,
+            PicturePlan::Shrink { or_original } => or_original && shrunk.map_or(true, |shrunk| shrunk >= len),
+        }
+    }
+}
+
+/// What `sips` writes a smaller picture as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PictureFormat {
+    Heic,
+    Jpeg,
+}
+
+impl PictureFormat {
+    fn sips_name(self) -> &'static str {
+        match self {
+            PictureFormat::Heic => "heic",
+            PictureFormat::Jpeg => "jpeg",
+        }
+    }
+
+    /// The `sips` steps for a picture of `size` (width, height) pixels: the
+    /// longer side to bring it down to (`-Z`; `None`: keep its size, `-Z` would
+    /// also enlarge it) and the quality, in percent — what `formatOptions`
+    /// takes for HEIC as for JPEG (its default for HEIC is 80, `normal` 50).
+    fn steps(self, size: Option<(u32, u32)>) -> Vec<(Option<u32>, u8)> {
+        let steps: &[(u32, u8)] = match self {
+            PictureFormat::Heic => &CLIP_HEIC_STEPS,
+            PictureFormat::Jpeg => &CLIP_JPEG_STEPS,
+        };
+        steps.iter().map(|&(side, quality)| (fit_area(size, side), quality)).collect()
+    }
+}
+
+/// The longer side that brings a picture of `size` down to the area of a
+/// `side` × `side` square; `None` when it is that small already. Not knowing
+/// the size, the longer side becomes `side`. A very long picture stops at four
+/// times the side, past what HEIC handles in one piece.
+fn fit_area(size: Option<(u32, u32)>, side: u32) -> Option<u32> {
+    let Some((width, height)) = size else { return Some(side) };
+    let (area, target) = (u64::from(width) * u64::from(height), u64::from(side) * u64::from(side));
+    let longest = width.max(height);
+    if area <= target && longest <= side * 4 {
+        return None;
+    }
+    let scaled = (f64::from(longest) * (target as f64 / area as f64).sqrt()).floor() as u32;
+    Some(scaled.min(side * 4).min(longest).max(1))
+}
+
+/// A HEIC (or another HEIF), by its `ftyp` box.
+fn is_heic(bytes: &[u8]) -> bool {
+    bytes.len() >= 12 && &bytes[4..8] == b"ftyp" && matches!(&bytes[8..12], b"heic" | b"heix" | b"mif1" | b"hevc")
+}
+
 /// PNG, JPEG, GIF, TIFF or HEIC: what the phone's UIImage opens as it is.
 fn phone_opens(bytes: &[u8]) -> bool {
     bytes.starts_with(&[0x89, b'P', b'N', b'G'])
@@ -748,55 +850,71 @@ fn phone_opens(bytes: &[u8]) -> bool {
         || bytes.starts_with(b"GIF8")
         || bytes.starts_with(b"II*\0")
         || bytes.starts_with(b"MM\0*")
-        || (bytes.len() >= 12 && &bytes[4..8] == b"ftyp" && matches!(&bytes[8..12], b"heic" | b"heix" | b"mif1" | b"hevc"))
+        || is_heic(bytes)
 }
 
-/// Turns any picture into a JPEG under `CLIP_IMAGE_BYTES`, smaller and rougher
-/// until it fits, with macOS's own `sips`. Never larger than it was.
-fn shrink_to_jpeg(source: &Path, target: &Path) -> bool {
+/// Turns any picture into a HEIC under `CLIP_IMAGE_BYTES`, smaller and rougher
+/// until it fits, with macOS's own `sips`; a JPEG on a Mac that cannot write
+/// HEIC. Never enlarged. Answers the size of what it made.
+fn shrink(source: &Path, target: &Path) -> Option<u64> {
     #[cfg(target_os = "macos")]
     {
-        let longest = longest_side(source);
-        for (side, quality) in [(1600u32, 75), (1024, 60), (640, 50)] {
-            let mut command = std::process::Command::new("/usr/bin/sips");
-            command.args(["-s", "format", "jpeg", "-s", "formatOptions", &quality.to_string()]);
-            // Only ever smaller: no `-Z` for a picture already within the side.
-            if longest.map_or(true, |longest| longest > side) {
-                command.args(["-Z", &side.to_string()]);
+        let size = pixel_size(source);
+        for format in [PictureFormat::Heic, PictureFormat::Jpeg] {
+            let mut wrote = false;
+            for (side, quality) in format.steps(size) {
+                let mut command = std::process::Command::new("/usr/bin/sips");
+                command.args(["-s", "format", format.sips_name(), "-s", "formatOptions", &quality.to_string()]);
+                if let Some(side) = side {
+                    command.args(["-Z", &side.to_string()]);
+                }
+                let made = command
+                    .arg(source)
+                    .arg("--out")
+                    .arg(target)
+                    .output()
+                    .is_ok_and(|output| output.status.success());
+                let size = std::fs::metadata(target).map(|meta| meta.len()).unwrap_or(0);
+                // A format this Mac cannot write: sips says so and writes nothing.
+                if !made || size == 0 {
+                    break;
+                }
+                wrote = true;
+                if size <= CLIP_IMAGE_BYTES {
+                    return Some(size);
+                }
             }
-            let made = command
-                .arg(source)
-                .arg("--out")
-                .arg(target)
-                .output()
-                .is_ok_and(|output| output.status.success());
-            let size = std::fs::metadata(target).map(|meta| meta.len()).unwrap_or(u64::MAX);
-            if made && size <= CLIP_IMAGE_BYTES {
-                return true;
+            // JPEG only stands in for a HEIC that could not be written; one
+            // that was and still did not fit would not fit as a JPEG either.
+            if wrote {
+                break;
             }
         }
     }
     #[cfg(not(target_os = "macos"))]
     let _ = source;
     let _ = std::fs::remove_file(target);
-    false
+    None
 }
 
-/// The longer of a picture's width and height, as `sips` reads it.
+/// A picture's width and height, as `sips` reads them.
 #[cfg(target_os = "macos")]
-fn longest_side(path: &Path) -> Option<u32> {
+fn pixel_size(path: &Path) -> Option<(u32, u32)> {
     let output = std::process::Command::new("/usr/bin/sips")
         .args(["-g", "pixelWidth", "-g", "pixelHeight"])
         .arg(path)
         .output()
         .ok()?;
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| {
-            let (key, value) = line.trim().split_once(':')?;
-            matches!(key.trim(), "pixelWidth" | "pixelHeight").then(|| value.trim().parse::<u32>().ok())?
-        })
-        .max()
+    let (mut width, mut height) = (None, None);
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let Some((key, value)) = line.trim().split_once(':') else { continue };
+        match key.trim() {
+            "pixelWidth" => width = value.trim().parse::<u32>().ok(),
+            "pixelHeight" => height = value.trim().parse::<u32>().ok(),
+            _ => {}
+        }
+    }
+    Some((width?, height?))
 }
 
 /// Pictures of entries that have left the window are not needed any more, nor
@@ -952,6 +1070,102 @@ mod tests {
         assert!(!phone_opens(b"BM.........."));
         assert!(!phone_opens(b"\0\0\0\x18ftypisom...."));
         assert!(!phone_opens(b""));
+    }
+
+    #[test]
+    fn only_small_pictures_skip_the_re_encode() {
+        use PicturePlan::*;
+        assert_eq!(PicturePlan::for_picture(4_000, true, false), AsItIs, "an icon");
+        assert_eq!(PicturePlan::for_picture(CLIP_IMAGE_SMALL, true, false), AsItIs);
+        // A screenshot that would fit as it is: re-encoded, unless that is no smaller.
+        assert_eq!(PicturePlan::for_picture(CLIP_IMAGE_SMALL + 1, true, false), Shrink { or_original: true });
+        assert_eq!(PicturePlan::for_picture(CLIP_IMAGE_BYTES, true, false), Shrink { or_original: true });
+        // A HEIC that fits is as small as a re-encode would make it.
+        assert_eq!(PicturePlan::for_picture(CLIP_IMAGE_BYTES, true, true), AsItIs);
+        assert_eq!(PicturePlan::for_picture(CLIP_IMAGE_BYTES + 1, true, true), Shrink { or_original: false });
+        // Too big to go as it is, or in a format the phone does not open: it has to be shrunk.
+        assert_eq!(PicturePlan::for_picture(CLIP_IMAGE_BYTES + 1, true, false), Shrink { or_original: false });
+        assert_eq!(PicturePlan::for_picture(4_000, false, false), Shrink { or_original: false });
+    }
+
+    #[test]
+    fn a_picture_never_goes_out_larger_than_it_was() {
+        let fits = PicturePlan::for_picture(600_000, true, false);
+        assert!(!fits.keeps_original(600_000, Some(150_000)), "smaller: the HEIC goes");
+        assert!(fits.keeps_original(600_000, Some(600_000)), "no smaller: the original goes");
+        assert!(fits.keeps_original(600_000, Some(700_000)));
+        assert!(fits.keeps_original(600_000, None), "sips failed, but the original fits");
+        let big = PicturePlan::for_picture(2_500_000, true, false);
+        assert!(!big.keeps_original(2_500_000, Some(400_000)));
+        assert!(!big.keeps_original(2_500_000, None), "nothing fits: no picture at all");
+        let bitmap = PicturePlan::for_picture(300_000, false, false);
+        assert!(!bitmap.keeps_original(300_000, Some(400_000)), "the phone cannot open the original");
+        assert!(PicturePlan::for_picture(4_000, true, false).keeps_original(4_000, None));
+    }
+
+    #[test]
+    fn pictures_are_only_ever_made_smaller() {
+        use PictureFormat::*;
+        // A full Retina screenshot: brought down step by step, keeping its shape.
+        assert_eq!(Heic.steps(Some((3420, 2146))), vec![(Some(2585), 80), (Some(2019), 70), (Some(1292), 60), (Some(807), 50)]);
+        // Within the area of the first steps: kept at its size there, rougher instead.
+        assert_eq!(Heic.steps(Some((1240, 770))), vec![(None, 80), (None, 70), (None, 60), (Some(812), 50)]);
+        assert_eq!(Heic.steps(Some((2048, 2048)))[0], (None, 80));
+        assert!(Heic.steps(Some((500, 400))).iter().all(|(side, _)| side.is_none()));
+        // A long scrolling screenshot keeps a readable width…
+        let (side, _) = Heic.steps(Some((1179, 8000)))[0];
+        assert_eq!(side, Some(5334), "about 786 wide");
+        // …and an endless one stops at four times the side.
+        assert_eq!(Heic.steps(Some((1179, 40_000)))[0].0, Some(8192));
+        assert_eq!(Heic.steps(Some((300, 12_000)))[0].0, Some(8192), "small in area, too long for one piece");
+        // A size sips could not read: brought down anyway.
+        assert!(Heic.steps(None).iter().all(|(side, _)| side.is_some()));
+        assert_eq!(Jpeg.steps(Some((3420, 2146))), vec![(Some(2019), 75), (Some(1292), 60), (Some(807), 50)]);
+        for format in [Heic, Jpeg] {
+            let steps = format.steps(None);
+            assert!(steps.windows(2).all(|pair| pair[1].0 < pair[0].0 && pair[1].1 < pair[0].1), "{format:?}");
+        }
+    }
+
+    /// The real thing, with the Mac's own sips: a bitmap the phone cannot open,
+    /// wider than the largest step, comes back as a picture it can, within the
+    /// limit and the side. A HEIC, or a JPEG where HEIC cannot be written.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn sips_makes_a_picture_the_phone_opens_and_that_fits() {
+        let dir = std::env::temp_dir().join(format!("bangs-clip-{}", fnv_hex(&format!("{:?}", std::time::SystemTime::now()))));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (width, height) = (3000u32, 200u32);
+        let pixels = width * height * 3; // 24 bits, rows already a multiple of 4 bytes
+        let mut bmp = Vec::new();
+        bmp.extend_from_slice(b"BM");
+        for value in [54 + pixels, 0, 54, 40, width, height] {
+            bmp.extend_from_slice(&value.to_le_bytes());
+        }
+        bmp.extend_from_slice(&1u16.to_le_bytes());
+        bmp.extend_from_slice(&24u16.to_le_bytes());
+        for value in [0, pixels, 2835, 2835, 0, 0] {
+            bmp.extend_from_slice(&value.to_le_bytes());
+        }
+        for y in 0..height {
+            for x in 0..width {
+                bmp.extend_from_slice(&[(x % 256) as u8, (y % 256) as u8, if (x / 8 + y / 8) % 2 == 0 { 255 } else { 0 }]);
+            }
+        }
+        let source = dir.join("wide.bmp");
+        let target = dir.join("wide.img");
+        std::fs::write(&source, &bmp).unwrap();
+        assert!(!phone_opens(&bmp));
+
+        let size = shrink(&source, &target);
+        let made = std::fs::read(&target).unwrap_or_default();
+        let longest = pixel_size(&target).map(|(width, height)| width.max(height));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(size, Some(made.len() as u64));
+        assert!(made.len() as u64 <= CLIP_IMAGE_BYTES);
+        assert!(phone_opens(&made), "{:?}", &made[..made.len().min(12)]);
+        // 3000 × 200 has the area of a 775-pixel square: kept at its size.
+        assert_eq!(longest, Some(3000));
     }
 
     #[test]

@@ -24,7 +24,7 @@ Windows 版没有 iCloud，同步保持关闭，行为和以前完全一样。
 | --- | --- | --- | --- |
 | `todo` | 双向 | Mac 生成的 id，或 iOS 生成的 UUID | 勾选 = 完成（`done`，可以再勾回来），是对记录的修改；删除才写墓碑 |
 | `session` | Mac → iOS | `<device8>-<会话 id>` | Claude Code / Codex 会话的忙碌、等待、空闲；Mac 上消失的会话写墓碑 |
-| `clip` | Mac → iOS | `<device8>-<内容哈希>` | 最近 24 条剪贴板（面板的第一页）；文本带全文（≤ 8000 字符），图片端到端加密同步（≤ 900 KB，见下面的 `image`），文件只有预览文字。读不到 Paste 的数据库时这一轮不动，免得 id 全变 |
+| `clip` | Mac → iOS | `<device8>-<内容哈希>` | 最近 24 条剪贴板（面板的第一页）；文本带全文（≤ 8000 字符），图片端到端加密同步（小图原样，其余多半转成 HEIC，≤ 900 KB，见下面的 `image`），文件只有预览文字。读不到 Paste 的数据库时这一轮不动，免得 id 全变 |
 | `device` | Mac → iOS | `<device8>` | 心跳：Mac 每 10 分钟写一次。手机上超过 20 分钟没有心跳的 Mac，它的会话显示为离线（睡眠、退出了 Bangs） |
 | `shelf` | Mac → iOS | `<device8>-<路径哈希>` | 暂存架；≤ 25 MB（25,000,000 字节，十进制）的文件作为 CKAsset 上传，更大的只同步元数据。文件夹不同步 |
 
@@ -55,7 +55,7 @@ Windows 版没有 iCloud，同步保持关闭，行为和以前完全一样。
 | `deleted` | Int64 | 1 = 墓碑。删除用墓碑而不是 `CKDatabase.deleteRecord`，这样落后的设备也能知道它没了 |
 | `body` | String | 下面的 JSON 文本，≤ 64 KB；墓碑写 `{}`。**写入 `record.encryptedValues["body"]`，不是普通字段**，读取同理 |
 | `asset` | Asset（可选） | 只有 `shelf` 用；普通字段（不加密） |
-| `image` | Bytes（可选） | 只有 `clip` 用：复制的图片。不超过 900 KB 的 PNG / JPEG / GIF / TIFF / HEIC 原样发送（文字截图保持清晰），其它的 Mac 用 `sips` 转成 ≤ 900 KB 的 JPEG（最长边 1600 → 1024 → 640 逐级缩小，只缩不放）。**写入 `encryptedValues["image"]`**——CKAsset 没法端到端加密，截图可能和密码一样私密。传输格式里仍然是 `asset` 路径，引擎按 kind 决定放哪 |
+| `image` | Bytes（可选） | 只有 `clip` 用：复制的图片，照 Paste 给自己的存储瘦身的做法（它的 `ImageCompressor`）处理，尽量少占用户的 iCloud 空间和手机。不超过 200 KB 的 PNG / JPEG / GIF / TIFF / HEIC 原样发送（图标、小截图不值得重新编码），不超过 900 KB 的 HEIC 也原样发送（再编码一次只省不到 1%）；其它的 Mac 用 `sips` 转成 HEIC，从「面积不超过 2048 × 2048」、质量 80 开始，放不进 900 KB 就降到 1600² / 70 → 1024² / 60 → 640² / 50，只缩不放。按面积而不是按最长边缩：长截图（比如 1179 × 8000）保持能看清的宽度，最长边最多到边长的 4 倍。实测 0.3–2.5 MB 的 PNG 截图只剩原来的 1/4 到 1/10，字仍然清楚，透明的地方保留透明。原图手机能打开、又不超过 900 KB 时，转出来的 HEIC 不比原图小就发原图——绝不变大。写不了 HEIC 的 Mac（没有 HEVC 编码器的老 Intel 机型）改转 JPEG（1600² / 75 → 1024² / 60 → 640² / 50）。手机端用 `UIImage` 直接打开，HEIC 不用另外处理。**写入 `encryptedValues["image"]`**——CKAsset 没法端到端加密，截图可能和密码一样私密。传输格式里仍然是 `asset` 路径，引擎按 kind 决定放哪 |
 
 所有设备共用一种记录类型，是为了不让两端各自维护字段映射：加字段只改 `body`，不用动生产 schema。
 
