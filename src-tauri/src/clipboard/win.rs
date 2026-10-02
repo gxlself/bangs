@@ -127,12 +127,13 @@ pub fn copy(app: AppHandle, id: i64) -> Result<(), String> {
 }
 
 /// The whole text of the text entries among `ids`, for sync.
-pub fn full_texts(app: &AppHandle, ids: &[i64]) -> std::collections::HashMap<i64, String> {
-    load(app)
+pub fn full_texts(app: &AppHandle, ids: &[i64]) -> Option<std::collections::HashMap<i64, String>> {
+    let texts = load(app)
         .into_iter()
         .filter(|clip| ids.contains(&clip.item.id) && clip.item.kind == ClipKind::Text && !clip.text.is_empty())
         .map(|clip| (clip.item.id, clip.text))
-        .collect()
+        .collect();
+    Some(texts)
 }
 
 pub fn clear(app: AppHandle) -> Result<(), String> {

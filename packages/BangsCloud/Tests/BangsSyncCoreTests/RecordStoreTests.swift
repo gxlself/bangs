@@ -123,6 +123,29 @@ final class RecordStoreTests: XCTestCase {
         XCTAssertTrue(other.outbox.isEmpty)
     }
 
+    func testATombstoneQueuedWhileTheLineIsInFlightIsNotLost() {
+        var store = RecordStore()
+        store.localUpsert(kind: "todo", id: "a", body: todoBody("milk"), now: 100, device: phone)
+        XCTAssertEqual(store.takeOutbox().count, 1)          // the live line goes out
+        store.localDelete(kind: "todo", id: "a", now: 110, device: phone)
+        XCTAssertTrue(store.takeOutbox().isEmpty)            // held back while "a" is in flight
+        store.markSettled(keys: ["todo:a"])                  // the live line landed
+        let next = store.takeOutbox()
+        XCTAssertEqual(next.count, 1)
+        XCTAssertEqual(next.first?.deleted, true)            // now the tombstone goes
+    }
+
+    func testRequeuePutsLiveRecordsBack() {
+        var store = RecordStore()
+        store.localUpsert(kind: "todo", id: "a", body: todoBody("a"), now: 100, device: phone)
+        store.localUpsert(kind: "todo", id: "b", body: todoBody("b"), now: 100, device: phone)
+        store.localDelete(kind: "todo", id: "b", now: 110, device: phone)
+        _ = store.takeOutbox()
+        store.markSettled(keys: ["todo:a", "todo:b"])
+        store.requeue(kind: "todo")
+        XCTAssertEqual(Array(store.outbox.keys), ["todo:a"])
+    }
+
     func testPurgeTombstones() {
         var store = RecordStore()
         store.localUpsert(kind: "todo", id: "old", body: todoBody("x"), now: 10, device: phone)

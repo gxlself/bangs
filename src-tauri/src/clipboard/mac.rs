@@ -161,21 +161,24 @@ pub fn refresh(app: &AppHandle) {
     }
 }
 
-/// The whole text of the text entries among `ids`, for sync.
-pub fn full_texts(ids: &[i64]) -> HashMap<i64, String> {
-    let Some(connection) = connect() else { return HashMap::new() };
-    ids.iter()
+/// The whole text of the text entries among `ids`, for sync; `None` when
+/// Paste's store cannot be opened.
+pub fn full_texts(ids: &[i64]) -> Option<HashMap<i64, String>> {
+    let connection = connect()?;
+    let texts = ids
+        .iter()
         .filter_map(|id| {
             let text: Option<String> = connection
                 .query_row(
-                    "SELECT ZPLAINTEXT FROM ZCLIPBOARDITEMENTENTITY WHERE Z_PK = ?1 AND ZTYPE NOT IN (?2, ?3)",
+                    "SELECT ZPLAINTEXT FROM ZCLIPBOARDITEMENTITY WHERE Z_PK = ?1 AND ZTYPE NOT IN (?2, ?3)",
                     rusqlite::params![id, KIND_IMAGE, KIND_FILES],
                     |row| row.get(0),
                 )
                 .ok()?;
             text.filter(|text| !text.is_empty()).map(|text| (*id, text))
         })
-        .collect()
+        .collect();
+    Some(texts)
 }
 
 /// Puts a history entry back on the clipboard — the picture itself for an

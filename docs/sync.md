@@ -24,14 +24,15 @@ Windows 版没有 iCloud，同步保持关闭，行为和以前完全一样。
 | --- | --- | --- | --- |
 | `todo` | 双向 | Mac 生成的 id，或 iOS 生成的 UUID | 勾掉 = 删除（和 Bangs 现有行为一致），删除以墓碑记录传播 |
 | `session` | Mac → iOS | `<device8>-<会话 id>` | Claude Code / Codex 会话的忙碌、等待、空闲；Mac 上消失的会话写墓碑 |
-| `clip` | Mac → iOS | `<device8>-<内容哈希>` | 最近 30 条剪贴板；文本带全文（≤ 8000 字符），图片/文件只有预览文字 |
-| `shelf` | Mac → iOS | `<device8>-<路径哈希>` | 文件架；≤ 25 MB（25,000,000 字节，十进制）的文件作为 CKAsset 上传，更大的只同步元数据 |
+| `clip` | Mac → iOS | `<device8>-<内容哈希>` | 最近 24 条剪贴板（面板的第一页）；文本带全文（≤ 8000 字符），图片/文件只有预览文字。读不到 Paste 的数据库时这一轮不动，免得 id 全变 |
+| `shelf` | Mac → iOS | `<device8>-<路径哈希>` | 文件架；≤ 25 MB（25,000,000 字节，十进制）的文件作为 CKAsset 上传，更大的只同步元数据。文件夹不同步 |
 
 - `device8` 是设备 id（随机 UUID，去掉连字符取前 8 位小写十六进制）。镜像类 kind 的 id 带设备前缀，
   所以两台 Mac 不会互相写墓碑；镜像只会清理**本设备**写过的记录。
 - iOS 端把 `session` / `clip` / `shelf` 当只读缓存；只有 `todo` 会从 iOS 写回。
 - 记录 id 必须是 ASCII：`[A-Za-z0-9._-]{1,128}`（CloudKit 的 recordName 限制）。
-  不满足时发送方改用原值的 FNV-1a 64 位十六进制。
+  镜像类 kind 不满足时改用原值的 FNV-1a 64 位十六进制；待办的 id 由 Bangs 和 iOS 端生成，总是满足，
+  手改 `todos.json` 造出来的不满足的 id 不同步。
 
 ## CloudKit 约定
 
@@ -144,7 +145,9 @@ void    bangs_cloud_stop(void);
   检查方法是 `SecTaskCopyValueForEntitlement`（Paste 的 `ICloudCapability.swift` 同一个做法）。
   比 Paste 更严一点：`icloud-services` 里要有 `CloudKit`，`icloud-container-identifiers` 里要有
   `iCloud.com.gxlself.bangs`，因为打开一个签名里没列出的容器同样会崩。
-- `state_dir` 用来放变更令牌（`token.bin`）和下载的资源（`assets/<recordName>`）。
+- `state_dir` 用来放变更令牌（`token.bin`）、当前 iCloud 账号（`account.txt`）和下载的资源
+  （`assets/<recordName 里的 : 换成 _>`，不进备份）。Mac 端不保留资源文件：文件架只从 Mac 往外发，
+  Mac 拉回来的只会是自己上传的那些。
 - `callback` 可能在任意线程被调用；`event_json` 只在调用期间有效，需要自行拷贝。事件：
 
 ```jsonc
@@ -154,13 +157,25 @@ void    bangs_cloud_stop(void);
 {"event":"pushed","keys":["todo:18f2a-0"]}
 {"event":"rejected","keys":["todo:18f2a-0"]}        // 冲突里输了；赢的那条会随后以 records 事件到达
 {"event":"failed","keys":["todo:18f2a-0"],"message":"…","retryAfter":30}   // 临时失败，调用方放回队列
+{"event":"reset","reason":"zone"}                   // 云端丢了这台设备放上去的东西，见下
 ```
 
 - `ready` 表示账号可用、zone 和订阅都建好了；收到后调用方应先 `bangs_cloud_pull()`，再推送队列。
 - **每次 `pull` / `push` 都以一个 `status` 事件收尾**：开始时发 `syncing`，成功结束发 `idle`，失败发 `error`
   （带 `message`）。`records` / `pushed` / `rejected` / `failed` 事件排在这个收尾事件之前。
   调用方靠「`ready` 之后的第一个 `idle`」知道启动时的那次拉取已经完成，之后才推送离线期间攒下的队列。
-- 令牌过期（`changeTokenExpired`）时引擎自己丢掉令牌从头拉；`zoneNotFound` 时自己重建 zone。
+- 令牌过期（`changeTokenExpired`）时引擎自己丢掉令牌从头拉。
+- **`reset`**：zone 没了（`zoneNotFound` / `userDeletedZone`，比如在 Dashboard 里 Reset Development Environment）
+  时引擎重建 zone 并发 `{"event":"reset","reason":"zone"}`；`start()` 发现登录的 iCloud 账号和上次不同时
+  （比较 `CKContainer.userRecordID()`，存在 `account.txt`）丢掉令牌并发 `{"event":"reset","reason":"account"}`。
+  收到后调用方要把自己的数据**全部重新上传**：Mac 端清空版本表、重新收编待办、重新镜像其它三类；
+  iOS 端遇到 `zone` 把本地的待办重新放进队列，遇到 `account` 清空本地存储（那是另一个账号的数据）。
+  账号变化时（`CKAccountChanged` 通知）引擎会自己重新 `start()`；没登录（`notAuthenticated`）一律报 `noAccount`。
+- 引擎被 `stop()` 之后不再发任何事件，也不再保存令牌——停掉时正在进行的拉取不会把没人收的记录算作已拉取。
+- 推送时遇到不会因为重试而好转的错误（`invalidArguments`、`assetFileNotFound`、`permissionFailure`）
+  按 `rejected` 报告并在 stderr 留一行日志，不会每 30 秒重试一次、挡住后面的改动。
+- 托盘手动打开同步时，Mac 端会删掉令牌从头拉一次：关着的时候到达的记录没人收，令牌不能信。
+
 - Mac 端不接收静默推送（Tauri 占着 AppDelegate），所以每 20 秒拉一次；托盘菜单的「立即同步」马上拉一次，
   并且不等失败后的重试间隔就把队列推出去。
 
@@ -176,7 +191,12 @@ TestFlight / App Store / Developer ID 的包读写 Production，两边互相看�
 | 正式使用（Production） | Developer ID 签名的发布包，带 Developer ID profile | TestFlight / App Store |
 
 上生产之前，要在 CloudKit Dashboard 里把 Development 的 schema **Deploy to Production**，
-否则生产环境里没有 `BangsRecord` 这个记录类型，所有保存都会失败。
+否则生产环境里没有 `BangsRecord` 这个记录类型，所有保存都会失败。部署之前，先在 Development 里
+至少同步过一个文件架里的文件：`asset` 字段是第一次有人存它时才建出来的，没建的字段不会被部署，
+生产环境里所有带文件的推送就都会失败。
+
+发布用的 `entitlements.icloud.plist` 写明了 `com.apple.developer.icloud-container-environment = Production`，
+联调用的写 `Development`：Developer ID 签名的 app 必须自己声明用哪个环境（Xcode 导出 Developer ID 时会自动加上）。
 
 一次性的 Apple Developer 配置（团队 `W8L8ZJ3N2P`）：
 
@@ -194,11 +214,14 @@ TestFlight / App Store / Developer ID 的包读写 Production，两边互相看�
   Linux 三个目标上通过了类型检查，Swift 部分（尤其是 `CloudEngine.swift` 和 `Bridge.swift`）从没编译过，
   第一次在 Mac 上 `swift test` 和 Xcode Run 时很可能要修几处编译错误。合并规则有共用的测试向量，
   CloudKit 那一层只能靠真机联调。
-- **App 图标是透明边距的圆角方块**（直接用了桌面端的图标）。开发运行没问题，但 TestFlight / App Store
-  会拒收带 alpha 通道的图标，上架前要换一张不透明、铺满的 1024×1024。
+- iOS 图标是从桌面端图标生成的（圆角方块放大铺满、四角补渐变、去掉透明通道），能过 App Store 的检查，
+  但设计上值得找人出一张正式的。
+- 每次更新已有记录都要两个请求：引擎每次都新建 `CKRecord`，第一次必然撞 `serverRecordChanged`，
+  拿服务器那份再存一次。可以按 key 缓存 system fields 省掉一次，没做。
 - 关闭同步只是停止收发，iCloud 里已经同步的记录保留，手机上还看得到最后的状态。
-- iOS 端收到记录和保存变更令牌之间有几毫秒的间隙：恰好在这时被杀，会漏掉那一批记录。
-  `store.json` 丢失或损坏时 iOS 端会连令牌一起删掉重新全量拉取，所以数据不会就此不一致，只是这个窗口本身没补。
+- iOS 端收到记录和保存变更令牌之间有几毫秒的间隙（事件要切到主线程处理）：恰好在这时被杀，会漏掉那一批记录。
+  `store.json` 丢失或损坏时 iOS 端会连令牌一起删掉重新全量拉取，只是这个窗口本身没补。
+  Mac 端没有这个问题：回调是同步的，Rust 存完数据才返回，引擎之后才存令牌。
 
 ## 不在第一阶段里的东西
 

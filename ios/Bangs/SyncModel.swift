@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import CloudKit
 import BangsSyncCore
 import BangsCloud
 
@@ -52,6 +53,7 @@ final class SyncModel: ObservableObject {
     private var failureStreak = 0
     private var retryTask: Task<Void, Never>?
     private var pollTask: Task<Void, Never>?
+    private var accountObserver: NSObjectProtocol?
 
     private init() {
         let fileManager = FileManager.default
@@ -104,6 +106,18 @@ final class SyncModel: ObservableObject {
             }
         )
         self.engine = engine
+        // Signing out, or into another account: look again. A different account arrives as
+        // `reset("account")` before `ready`.
+        accountObserver = NotificationCenter.default.addObserver(
+            forName: .CKAccountChanged,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let engine = self?.engine else { return }
+                await engine.start()
+            }
+        }
         Task {
             await engine.start()
         }
@@ -236,15 +250,35 @@ final class SyncModel: ObservableObject {
             if !adopted.isEmpty {
                 saveStore()
                 publish()
+                // A file taken off the Mac's shelf: its downloaded copy goes too.
+                for record in adopted where record.kind == "shelf" && record.deleted {
+                    try? FileManager.default.removeItem(at: AssetFiles.url(forKey: record.key, stateDirectory: stateDirectory))
+                }
             }
         case .pushed(let keys):
             store.markSettled(keys: keys)
             failureStreak = 0
             saveStore()
+            pushIfMore()
         case .rejected(let keys):
-            // Lost a conflict: the winning record comes as a `records` event.
+            // Lost a conflict (the winning record comes as a `records` event), or a change
+            // CloudKit will never take.
             store.markSettled(keys: keys)
             saveStore()
+            pushIfMore()
+        case .reset(let reason):
+            if reason == "account" {
+                // Another iCloud account: what is here belongs to the old one.
+                store = RecordStore()
+                try? FileManager.default.removeItem(
+                    at: stateDirectory.appendingPathComponent(CloudEngine.assetsDirectoryName, isDirectory: true)
+                )
+            } else {
+                // The zone was emptied: put this phone's to-dos back. The Mac puts back its own.
+                store.requeue(kind: "todo")
+            }
+            saveStore()
+            publish()
         case .failed(let keys, let message, let retryAfter):
             print("[sync] push failed: \(message)")
             store.restoreInflight(keys: keys)
@@ -259,6 +293,13 @@ final class SyncModel: ObservableObject {
         guard let engine = engine else { return }
         Task {
             await engine.pull()
+        }
+    }
+
+    /// A key held back while its earlier version was in flight is free now.
+    private func pushIfMore() {
+        if !store.outbox.isEmpty {
+            pushSoon()
         }
     }
 

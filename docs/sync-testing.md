@@ -103,6 +103,8 @@ scripts/dev-icloud.sh              # 构建、签名、运行；日志留在这�
 | 托盘关掉同步 | 状态行「已关闭」；之后 Mac 的改动不再到 iPhone（iCloud 里已有的保留） |
 | 再打开 | 关闭期间 Mac 上加的待办同步过去 |
 | iPhone 退出 iCloud 再打开 App | 设置页「没有登录 iCloud」和怎么处理的说明 |
+| Dashboard → Reset Development Environment（会删掉 zone 和所有记录） | 下一次拉取时两边各自把数据重新传上去（Mac 终端里有一行 `the cloud lost this Mac's records (zone)`），iPhone 上的待办和 Mac 镜像过来的内容都回来 |
+| iPhone 换一个 Apple ID 登录 | App 里旧账号的内容清空，从新账号拉；Mac 换账号则把本机的待办和镜像传到新账号 |
 
 ## 出问题时
 
@@ -121,4 +123,5 @@ scripts/dev-icloud.sh              # 构建、签名、运行；日志留在这�
 | 报 `Not Authenticated` | 那台设备没登录 iCloud |
 | 两边都正常但互相看不到 | 一边在 Development，一边在 Production（比如 iPhone 装的是 TestFlight 版）——见 [sync.md](sync.md#环境签名与权限) |
 | iPhone 上改的东西 Mac 很久才到 | 正常最多 20 秒；托盘「立即同步」可以马上拉 |
-| `Server Rejected Request` | 生产环境还没 Deploy Schema；开发环境一般是字段类型和已建的 schema 冲突，Dashboard 里 Reset Development Environment 后重试 |
+| `Server Rejected Request` | 生产环境还没 Deploy Schema；开发环境一般是字段类型和已建的 schema 冲突，Dashboard 里 Reset Development Environment 后重试（两边会自己把数据传回去） |
+| 发布版 Mac 和 TestFlight 版 iPhone 互相看不到 | Developer ID profile 里要有 Production 环境；`codesign -d --entitlements -` 看 `icloud-container-environment` 是不是 `Production` |

@@ -71,43 +71,64 @@ enum Origin {
 }
 
 /// Applies a change, saves it and tells the webview — and, for a change made
-/// here, sync: a line that is new is an upsert, one that is gone (ticked off,
-/// or pushed off the end of the list) is a delete.
+/// here, sync: a line that is new is an upsert, one that is gone is a delete.
+///
+/// The list is a glance, not a backlog: past `MAX_TODOS` the oldest lines fall
+/// off the end. That holds wherever the line that pushed them off came from,
+/// and a line that falls off goes on every device, so the phone and the notch
+/// keep showing the same list.
 fn edit(app: &AppHandle, origin: Origin, change: impl FnOnce(&mut Vec<Todo>)) {
-    let (todos, added, removed) = {
+    let (added, removed) = {
         let hub = app.state::<TodoHub>();
         let mut guard = hub.0.lock().unwrap();
         let before = guard.clone();
         change(&mut guard);
-        guard.truncate(MAX_TODOS);
-        if *guard == before {
-            return;
+        let dropped: Vec<String> =
+            if guard.len() > MAX_TODOS { guard.split_off(MAX_TODOS).into_iter().map(|todo| todo.id).collect() } else { Vec::new() };
+        let added: Vec<Todo> = match origin {
+            Origin::Here => guard.iter().filter(|todo| !before.iter().any(|old| old.id == todo.id)).cloned().collect(),
+            Origin::Sync => Vec::new(),
+        };
+        let mut removed: Vec<String> = match origin {
+            // What sync took away is already gone everywhere else.
+            Origin::Sync => Vec::new(),
+            Origin::Here => before
+                .iter()
+                .filter(|old| !guard.iter().any(|todo| todo.id == old.id))
+                .map(|old| old.id.clone())
+                .collect(),
+        };
+        for id in dropped {
+            if !removed.contains(&id) {
+                removed.push(id);
+            }
         }
-        let added: Vec<Todo> = guard.iter().filter(|todo| !before.iter().any(|old| old.id == todo.id)).cloned().collect();
-        let removed: Vec<String> =
-            before.iter().filter(|old| !guard.iter().any(|todo| todo.id == old.id)).map(|old| old.id.clone()).collect();
-        (guard.clone(), added, removed)
+        if *guard != before {
+            // Still under the lock, so a change racing this one (the phone's,
+            // arriving on another thread) cannot write an older list last.
+            save(app, &guard);
+            let _ = app.emit("bangs://todos", guard.clone());
+        }
+        (added, removed)
     };
 
-    if let Some(path) = path(app) {
-        let written = path
-            .parent()
-            .map(fs::create_dir_all)
-            .transpose()
-            .and_then(|_| fs::write(&path, serde_json::to_vec_pretty(&todos).unwrap_or_default()));
-        if let Err(error) = written {
-            eprintln!("[todos] failed to save to {}: {error}", path.display());
-        }
+    for todo in &added {
+        sync::todo_upsert(app, todo);
     }
-    let _ = app.emit("bangs://todos", todos);
+    for id in &removed {
+        sync::todo_delete(app, id);
+    }
+}
 
-    if origin == Origin::Here {
-        for todo in &added {
-            sync::todo_upsert(app, todo);
-        }
-        for id in &removed {
-            sync::todo_delete(app, id);
-        }
+fn save(app: &AppHandle, todos: &[Todo]) {
+    let Some(path) = path(app) else { return };
+    let written = path
+        .parent()
+        .map(fs::create_dir_all)
+        .transpose()
+        .and_then(|_| fs::write(&path, serde_json::to_vec_pretty(todos).unwrap_or_default()));
+    if let Err(error) = written {
+        eprintln!("[todos] failed to save to {}: {error}", path.display());
     }
 }
 
@@ -146,6 +167,12 @@ pub fn todo_remove(app: AppHandle, id: String) {
 #[cfg_attr(not(all(target_os = "macos", feature = "icloud")), allow(dead_code))]
 pub fn apply_remote(app: &AppHandle, records: Vec<Record>) {
     edit(app, Origin::Sync, |todos| merge_remote(todos, &records));
+}
+
+/// Lines the phone deleted that are still here — the app quit before it
+/// heard, or sync was off. They go without telling sync again.
+pub fn forget(app: &AppHandle, ids: &[String]) {
+    edit(app, Origin::Sync, |todos| todos.retain(|todo| !ids.contains(&todo.id)));
 }
 
 fn merge_remote(todos: &mut Vec<Todo>, records: &[Record]) {

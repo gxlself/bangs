@@ -84,16 +84,11 @@ pub fn next_stamp(prev: Option<u64>, now: u64) -> u64 {
     }
 }
 
-/// How long a push may go unanswered before its records are sent again.
-const IN_FLIGHT_MS: u64 = 120_000;
-
-/// What was sent and when, to tell an answer about it from one about a newer
-/// change, and to give up waiting.
+/// What was sent, to tell an answer about it from one about a newer change.
 #[derive(Debug, Clone)]
 struct Sent {
     updated_at: u64,
     device: String,
-    at: u64,
 }
 
 /// A record that should exist, for `Ledger::reconcile`.
@@ -135,7 +130,8 @@ impl Ledger {
             fs::create_dir_all(dir)?;
         }
         let temp = path.with_extension("json.tmp");
-        fs::write(&temp, serde_json::to_vec_pretty(self).unwrap_or_default())?;
+        // Compact: it is rewritten on every change and nobody reads it by hand.
+        fs::write(&temp, serde_json::to_vec(self).unwrap_or_default())?;
         fs::rename(temp, path)
     }
 
@@ -254,23 +250,26 @@ impl Ledger {
     }
 
     /// Hands out what is waiting to be sent and marks it as in flight, so the
-    /// next call does not send it twice — unless two minutes went by without
-    /// an answer, in which case it is sent again.
-    pub fn take_outbox(&mut self, now: u64) -> Vec<Record> {
+    /// next call does not send it again while the library is still on it. The
+    /// library answers every record it is given; if it is restarted instead,
+    /// `release_all` puts everything back.
+    pub fn take_outbox(&mut self) -> Vec<Record> {
         let mut batch = Vec::new();
         for (key, record) in &self.outbox {
-            let waiting = self.in_flight.get(key).is_some_and(|sent| sent.at.saturating_add(IN_FLIGHT_MS) > now);
-            if !waiting {
+            if !self.in_flight.contains_key(key) {
                 batch.push(record.clone());
             }
         }
         for record in &batch {
-            self.in_flight.insert(
-                record.key(),
-                Sent { updated_at: record.updated_at, device: record.device.clone(), at: now },
-            );
+            self.in_flight.insert(record.key(), Sent { updated_at: record.updated_at, device: record.device.clone() });
         }
         batch
+    }
+
+    /// The library started over and will not answer for what it had: all of
+    /// it goes out again.
+    pub fn release_all(&mut self) {
+        self.in_flight.clear();
     }
 
     /// The cloud took these (or decided against them): they are no longer owed.
@@ -295,12 +294,33 @@ impl Ledger {
         }
     }
 
-    /// Forgets tombstones older than `ttl_ms` that nothing is waiting on.
-    pub fn purge(&mut self, now: u64, ttl_ms: u64) {
+    /// Forgets tombstones that nothing is waiting on once they are older than
+    /// `ttl_for(kind)`.
+    pub fn purge(&mut self, now: u64, ttl_for: impl Fn(&str) -> u64) {
         let outbox = &self.outbox;
         self.versions.retain(|key, known| {
-            !(known.deleted && known.updated_at.saturating_add(ttl_ms) < now && !outbox.contains_key(key))
+            let kind = key.split(':').next().unwrap_or("");
+            !(known.deleted && known.updated_at.saturating_add(ttl_for(kind)) < now && !outbox.contains_key(key))
         });
+    }
+
+    /// The ids of the live records of `kind`.
+    pub fn live_ids(&self, kind: &str) -> Vec<String> {
+        self.ids(kind, false)
+    }
+
+    /// The ids of `kind` this device knows were deleted.
+    pub fn deleted_ids(&self, kind: &str) -> Vec<String> {
+        self.ids(kind, true)
+    }
+
+    fn ids(&self, kind: &str, deleted: bool) -> Vec<String> {
+        let prefix = format!("{kind}:");
+        self.versions
+            .iter()
+            .filter(|(key, known)| key.starts_with(&prefix) && known.deleted == deleted)
+            .map(|(key, _)| key[prefix.len()..].to_string())
+            .collect()
     }
 
     #[cfg(test)]
@@ -545,38 +565,39 @@ mod tests {
     fn the_outbox_is_handed_out_once_and_acknowledged() {
         let mut ledger = Ledger::new("mac".into());
         ledger.local_upsert(TODO, "1", todo("a"), None, 100).unwrap();
-        assert_eq!(ledger.take_outbox(1_000).len(), 1);
-        assert!(ledger.take_outbox(1_001).is_empty(), "in flight");
+        assert_eq!(ledger.take_outbox().len(), 1);
+        assert!(ledger.take_outbox().is_empty(), "in flight");
         ledger.acknowledge(&["todo:1".to_string()]);
         assert_eq!(ledger.pending(), 0);
     }
 
     #[test]
-    fn a_push_nobody_answers_is_sent_again() {
+    fn a_restarted_library_gets_everything_again() {
         let mut ledger = Ledger::new("mac".into());
         ledger.local_upsert(TODO, "1", todo("a"), None, 100).unwrap();
-        assert_eq!(ledger.take_outbox(1_000).len(), 1);
-        assert!(ledger.take_outbox(1_000 + IN_FLIGHT_MS - 1).is_empty());
-        assert_eq!(ledger.take_outbox(1_000 + IN_FLIGHT_MS + 1).len(), 1);
+        assert_eq!(ledger.take_outbox().len(), 1);
+        assert!(ledger.take_outbox().is_empty(), "never sent twice while in flight");
+        ledger.release_all();
+        assert_eq!(ledger.take_outbox().len(), 1);
     }
 
     #[test]
     fn a_failed_push_goes_out_again() {
         let mut ledger = Ledger::new("mac".into());
         ledger.local_upsert(TODO, "1", todo("a"), None, 100).unwrap();
-        ledger.take_outbox(1_000);
+        ledger.take_outbox();
         ledger.release(&["todo:1".to_string()]);
-        assert_eq!(ledger.take_outbox(1_001).len(), 1);
+        assert_eq!(ledger.take_outbox().len(), 1);
     }
 
     #[test]
     fn a_change_made_in_flight_survives_the_acknowledgement() {
         let mut ledger = Ledger::new("mac".into());
         ledger.local_upsert(TODO, "1", todo("first"), None, 100).unwrap();
-        ledger.take_outbox(1_000);
+        ledger.take_outbox();
         ledger.local_upsert(TODO, "1", todo("second"), None, 200).unwrap();
         ledger.acknowledge(&["todo:1".to_string()]);
-        let next = ledger.take_outbox(1_001);
+        let next = ledger.take_outbox();
         assert_eq!(next.len(), 1);
         assert_eq!(next[0].body["text"], "second");
     }
@@ -611,10 +632,22 @@ mod tests {
         ledger.seed("todo:old", 100, "x", true);
         ledger.seed("todo:recent", 900, "x", true);
         ledger.seed("todo:live", 100, "x", false);
-        ledger.purge(1_000, 500);
+        ledger.seed("clip:old", 900, "x", true);
+        ledger.purge(1_000, |kind| if kind == TODO { 500 } else { 50 });
         assert!(ledger.stamp_of("todo:old").is_none());
         assert!(ledger.stamp_of("todo:recent").is_some());
         assert!(ledger.stamp_of("todo:live").is_some());
+        assert!(ledger.stamp_of("clip:old").is_none(), "each kind keeps tombstones for its own time");
+    }
+
+    #[test]
+    fn live_and_deleted_ids_by_kind() {
+        let mut ledger = Ledger::new("mac".into());
+        ledger.seed("todo:a", 1, "x", false);
+        ledger.seed("todo:b", 1, "x", true);
+        ledger.seed("clip:c", 1, "x", false);
+        assert_eq!(ledger.live_ids(TODO), vec!["a".to_string()]);
+        assert_eq!(ledger.deleted_ids(TODO), vec!["b".to_string()]);
     }
 
     #[test]
@@ -622,7 +655,7 @@ mod tests {
         let mut ledger = Ledger::new("mac".into());
         ledger.local_upsert(TODO, "1", todo("a"), None, 100).unwrap();
         ledger.local_delete(TODO, "1", 200).unwrap();
-        ledger.purge(1_000_000, 10);
+        ledger.purge(1_000_000, |_| 10);
         assert!(ledger.stamp_of("todo:1").is_some());
     }
 
@@ -632,12 +665,12 @@ mod tests {
         let path = dir.join("ledger.json");
         let mut ledger = Ledger::new("mac".into());
         ledger.local_upsert(TODO, "1", todo("a"), None, 100).unwrap();
-        ledger.take_outbox(1_000);
+        ledger.take_outbox();
         ledger.save(&path).unwrap();
         let mut loaded = Ledger::load(&path).unwrap();
         assert_eq!(loaded.device, "mac");
         assert_eq!(loaded.pending(), 1);
-        assert_eq!(loaded.take_outbox(1_001).len(), 1, "in-flight marks are not saved");
+        assert_eq!(loaded.take_outbox().len(), 1, "in-flight marks are not saved");
         assert!(Ledger::load(&dir.join("missing.json")).is_none());
         let _ = fs::remove_dir_all(dir);
     }

@@ -2,6 +2,7 @@
 
 import Foundation
 import Security
+import CloudKit
 import BangsSyncCore
 import BangsCloud
 
@@ -55,6 +56,7 @@ private struct WireEvent: Encodable {
     var records: [SyncRecord]?
     var keys: [String]?
     var retryAfter: Int?
+    var reason: String?
 }
 
 private func statusEvent(_ state: String, message: String? = nil) -> WireEvent {
@@ -90,6 +92,8 @@ private func wireEvent(for event: CloudEvent) -> WireEvent {
         return WireEvent(event: "rejected", keys: keys)
     case .failed(let keys, let message, let retryAfter):
         return WireEvent(event: "failed", message: message, keys: keys, retryAfter: retryAfter)
+    case .reset(let reason):
+        return WireEvent(event: "reset", reason: reason)
     }
 }
 
@@ -117,6 +121,22 @@ private final class BridgeState: @unchecked Sendable {
     private let lock = NSLock()
     private var engine: CloudEngine?
     private var callback: BangsEventCallback?
+    private var accountObserver: NSObjectProtocol?
+
+    /// Starts the engine again whenever the iCloud account changes, once per process.
+    func observeAccountChanges() {
+        lock.lock()
+        defer { lock.unlock() }
+        if accountObserver != nil { return }
+        accountObserver = NotificationCenter.default.addObserver(
+            forName: .CKAccountChanged,
+            object: nil,
+            queue: nil
+        ) { [weak self] _ in
+            guard let engine = self?.currentEngine() else { return }
+            Task { await engine.start() }
+        }
+    }
 
     /// Installs a new engine and callback; returns the engine it replaced.
     func install(engine: CloudEngine?, callback: BangsEventCallback?) -> CloudEngine? {
@@ -194,6 +214,8 @@ public func bangsCloudStart(
     let engine = CloudEngine(
         containerID: BridgeSigning.containerID,
         stateDirectory: directory,
+        // The Mac only gets back the shelf files it uploaded; no point keeping copies.
+        keepAssets: false,
         onEvent: { event in
             deliver(wireEvent(for: event), to: callback)
         }
@@ -202,6 +224,7 @@ public func bangsCloudStart(
     if let old = old {
         Task { await old.stop() }
     }
+    bridgeState.observeAccountChanges()
     Task { await engine.start() }
 }
 

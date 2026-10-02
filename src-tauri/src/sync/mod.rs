@@ -33,13 +33,16 @@ use crate::todos::Todo;
 use ledger::{clean_id, fnv_hex, Desired, Ledger, CLIP, SESSION, SHELF, TODO};
 pub use ledger::Record;
 
-/// How many clipboard entries the phone gets: a glance, like the panel.
-const CLIP_WINDOW: usize = 30;
+/// How many clipboard entries the phone gets: the panel's first page, which is
+/// what the clipboard poll reads whether or not anyone scrolls.
+const CLIP_WINDOW: usize = crate::clipboard::PAGE;
 /// The longest clipboard text that is sent whole.
 const CLIP_CHARS: usize = 8_000;
 /// Bigger files stay on the Mac; the phone still sees that they exist.
 const SHELF_FILE_BYTES: u64 = 25_000_000;
-const TOMBSTONE_TTL_MS: u64 = 90 * 24 * 60 * 60 * 1000;
+const DAY_MS: u64 = 24 * 60 * 60 * 1000;
+/// The library's change token in the sync directory (CloudEngine.tokenFileName).
+const TOKEN_FILE: &str = "token.bin";
 /// Seconds between pulls; there is no push notification on this side, so this
 /// is how long a change made on the phone can take to show up here (the tray's
 /// "Sync now" does not wait). A zone-changes fetch is cheap; CloudKit allows
@@ -147,8 +150,8 @@ pub fn status_label(status: &SyncStatus) -> String {
     }
     match status.state.as_str() {
         "starting" => t("正在连接 iCloud…", "Connecting to iCloud…").into(),
-        "syncing" => t("正在同步…", "Syncing…").into(),
-        "ready" | "idle" => t("已连接，改动会自动同步", "Connected; changes sync on their own").into(),
+        // Every pull is a syncing → idle; the menu does not need to know.
+        "ready" | "idle" | "syncing" => t("已连接，改动会自动同步", "Connected; changes sync on their own").into(),
         "noAccount" => t("这台 Mac 没有登录 iCloud", "This Mac is not signed in to iCloud").into(),
         "restricted" => t("iCloud 被限制了", "iCloud is restricted").into(),
         "unavailable" => t("iCloud 暂时用不了", "iCloud is unavailable right now").into(),
@@ -162,7 +165,7 @@ pub fn status_label(status: &SyncStatus) -> String {
 /// Called once at start-up, after the panels have loaded their data.
 pub fn start(app: AppHandle) {
     if app.state::<SettingsState>().get().icloud_sync {
-        enable(&app);
+        enable(&app, false);
     }
 }
 
@@ -174,14 +177,17 @@ pub fn set_enabled(app: &AppHandle, on: bool) {
     }
     settings::update(app, |settings| settings.icloud_sync = on);
     if on {
-        enable(app);
+        // Turned on by hand: whatever arrived while it was off was dropped
+        // unread, so the change token cannot be trusted. Start from scratch;
+        // what is already known comes back as echoes and is ignored.
+        enable(app, true);
     } else {
         disable(app);
     }
     crate::tray::refresh(app);
 }
 
-fn enable(app: &AppHandle) {
+fn enable(app: &AppHandle, from_scratch: bool) {
     let hub = app.state::<SyncHub>();
     if hub.enabled.load(Ordering::Relaxed) {
         return;
@@ -192,6 +198,9 @@ fn enable(app: &AppHandle) {
         return;
     }
     let Some(dir) = sync_dir(app) else { return };
+    if from_scratch {
+        let _ = std::fs::remove_file(dir.join(TOKEN_FILE));
+    }
     let ledger_path = dir.join("ledger.json");
     let mut ledger = Ledger::load(&ledger_path).unwrap_or_else(|| {
         if ledger_path.exists() {
@@ -200,16 +209,10 @@ fn enable(app: &AppHandle) {
         }
         Ledger::new(random_device_id())
     });
-    ledger.purge(now_ms(), TOMBSTONE_TTL_MS);
+    ledger.purge(now_ms(), tombstone_ttl);
 
     let todos = app.state::<crate::todos::TodoHub>().current();
-    // Todos that were here before sync was: stamped with the day they were
-    // written, not today, so they never beat a later edit made elsewhere.
-    for todo in &todos {
-        if todo.id == clean_id(&todo.id) && !ledger.has_version(TODO, &todo.id) {
-            ledger.local_upsert(TODO, &todo.id, todo_body(todo), None, todo.created_at);
-        }
-    }
+    let gone_elsewhere = catch_up_todos(&mut ledger, &todos, now_ms());
 
     {
         let mut inner = hub.inner.lock().unwrap();
@@ -225,6 +228,9 @@ fn enable(app: &AppHandle) {
         save(&inner);
     }
     hub.enabled.store(true, Ordering::Relaxed);
+    if !gone_elsewhere.is_empty() {
+        crate::todos::forget(app, &gone_elsewhere);
+    }
     // What the panels have said so far.
     reconcile_sessions(app);
     reconcile_clips(app);
@@ -234,6 +240,59 @@ fn enable(app: &AppHandle) {
     cloud::start(app, &dir);
     let handle = app.clone();
     thread::spawn(move || pump(handle, generation));
+}
+
+/// Brings the ledger up to date with the to-do list as it is now, which can
+/// have moved on without it: sync was off, or the app quit between saving the
+/// one and the other. Returns the ids the ledger knows were deleted (from the
+/// phone) that are still on the list, for the caller to take off.
+fn catch_up_todos(ledger: &mut Ledger, todos: &[Todo], now: u64) -> Vec<String> {
+    let here: std::collections::HashSet<&str> = todos.iter().map(|todo| todo.id.as_str()).collect();
+    // Ticked off while nobody was listening: the phone still has to hear it.
+    for id in ledger.live_ids(TODO) {
+        if !here.contains(id.as_str()) {
+            ledger.local_delete(TODO, &id, now);
+        }
+    }
+    // New since: stamped with the day they were written, not today, so they
+    // never beat a later edit made elsewhere.
+    for todo in todos {
+        if todo.id == clean_id(&todo.id) && !ledger.has_version(TODO, &todo.id) {
+            ledger.local_upsert(TODO, &todo.id, todo_body(todo), None, todo.created_at);
+        }
+    }
+    let deleted = ledger.deleted_ids(TODO);
+    todos.iter().filter(|todo| deleted.contains(&todo.id)).map(|todo| todo.id.clone()).collect()
+}
+
+/// How long a tombstone is remembered. A to-do must not come back from a
+/// device that was away for weeks; a mirrored clip or session is only ever
+/// written by this Mac, and once it is gone it is never sent again.
+fn tombstone_ttl(kind: &str) -> u64 {
+    if kind == TODO {
+        90 * DAY_MS
+    } else {
+        DAY_MS
+    }
+}
+
+/// The cloud lost what this Mac had put there — the zone was deleted (or the
+/// development environment reset), or another iCloud account is signed in.
+/// Everything this Mac knows goes up again, as if sync had just been turned on.
+fn reset(app: &AppHandle) {
+    let todos = app.state::<crate::todos::TodoHub>().current();
+    let hub = app.state::<SyncHub>();
+    {
+        let mut inner = hub.inner.lock().unwrap();
+        let Some(ledger) = inner.ledger.as_mut() else { return };
+        let mut fresh = Ledger::new(ledger.device.clone());
+        catch_up_todos(&mut fresh, &todos, now_ms());
+        *ledger = fresh;
+        save(&inner);
+    }
+    reconcile_sessions(app);
+    reconcile_clips(app);
+    reconcile_shelf(app);
 }
 
 /// The tray's "Sync now": pull right away, and send whatever is waiting
@@ -296,6 +355,13 @@ fn pump(app: AppHandle, generation: u64) {
                 cloud::start(&app, &dir);
             }
         }
+        if tick % (DAY_MS / 1000) == 0 {
+            let mut inner = hub.inner.lock().unwrap();
+            if let Some(ledger) = inner.ledger.as_mut() {
+                ledger.purge(now_ms(), tombstone_ttl);
+            }
+            save(&inner);
+        }
         flush(&app);
     }
 }
@@ -312,7 +378,7 @@ fn flush(app: &AppHandle) {
             return;
         }
         match inner.ledger.as_mut() {
-            Some(ledger) => ledger.take_outbox(now),
+            Some(ledger) => ledger.take_outbox(),
             None => return,
         }
     };
@@ -366,6 +432,11 @@ enum Event {
         #[serde(default, rename = "retryAfter")]
         retry_after: Option<u64>,
     },
+    /// The cloud no longer has what was put there: "zone" or "account".
+    Reset {
+        #[serde(default)]
+        reason: String,
+    },
 }
 
 /// Entry point for everything the library says. Runs on whatever thread it
@@ -384,13 +455,17 @@ pub(crate) fn on_event(app: &AppHandle, raw: &str) {
     }
     match event {
         Event::Status { state, message } => {
-            let (just_ready, changed) = {
+            let (just_ready, label_changed) = {
                 let mut inner = hub.inner.lock().unwrap();
                 match state.as_str() {
                     "ready" => {
                         inner.ready = true;
                         inner.ready_at = now_ms();
                         inner.pulled = false;
+                        // A (re)started library holds nothing of what was sent before.
+                        if let Some(ledger) = inner.ledger.as_mut() {
+                            ledger.release_all();
+                        }
                     }
                     "idle" => {
                         if inner.ready {
@@ -404,15 +479,18 @@ pub(crate) fn on_event(app: &AppHandle, raw: &str) {
                     // fine, and the next pull or the retry time takes care of it.
                     _ => {}
                 }
-                let changed = inner.state != state || inner.message != message;
+                let label = |state: &str, message: &Option<String>| {
+                    status_label(&SyncStatus { supported: true, enabled: true, state: state.into(), message: message.clone() })
+                };
+                let before = label(&inner.state, &inner.message);
                 inner.state = state.clone();
                 inner.message = message;
-                (state == "ready", changed)
+                (state == "ready", before != label(&inner.state, &inner.message))
             };
             if just_ready {
                 cloud::pull();
             }
-            if changed {
+            if label_changed {
                 crate::tray::refresh(app);
             }
         }
@@ -420,16 +498,21 @@ pub(crate) fn on_event(app: &AppHandle, raw: &str) {
             let applied = {
                 let mut inner = hub.inner.lock().unwrap();
                 let Some(ledger) = inner.ledger.as_mut() else { return };
-                let applied = ledger.apply_remote(records);
-                save(&inner);
-                applied
+                ledger.apply_remote(records)
             };
+            if applied.is_empty() {
+                return;
+            }
             // Only the to-do list is edited from the phone; the other kinds
             // are the Mac's own mirror coming back, and need nothing here.
             let todos: Vec<Record> = applied.into_iter().filter(|record| record.kind == TODO).collect();
             if !todos.is_empty() {
                 crate::todos::apply_remote(app, todos);
             }
+            // The list is on disk before the ledger says it was applied: if the
+            // app dies in between, the next start sees the difference and
+            // settles it (`catch_up_todos`) instead of losing the change.
+            save(&hub.inner.lock().unwrap());
         }
         Event::Pushed { keys } | Event::Rejected { keys } => {
             let mut inner = hub.inner.lock().unwrap();
@@ -445,6 +528,10 @@ pub(crate) fn on_event(app: &AppHandle, raw: &str) {
                 ledger.release(&keys);
             }
             inner.retry_at = now_ms() + retry_after.unwrap_or(DEFAULT_RETRY_SECS) * 1000;
+        }
+        Event::Reset { reason } => {
+            eprintln!("[sync] the cloud lost this Mac's records ({reason}); sending everything again");
+            reset(app);
         }
     }
 }
@@ -527,7 +614,9 @@ fn reconcile_clips(app: &AppHandle) {
     let Some((device, host)) = identity(app) else { return };
     let Some(items) = app.state::<SyncHub>().inner.lock().unwrap().clips.clone() else { return };
     let text_ids: Vec<i64> = items.iter().filter(|item| item.kind == ClipKind::Text).map(|item| item.id).collect();
-    let texts = crate::clipboard::full_texts(app, &text_ids);
+    // Without the texts every id would change (they are hashes of the text),
+    // which would delete and resend the whole window; try again next time.
+    let Some(texts) = crate::clipboard::full_texts(app, &text_ids) else { return };
 
     let mut seen = std::collections::HashSet::new();
     let mut desired = Vec::new();
@@ -704,6 +793,54 @@ mod tests {
         assert!(matches!(records, Event::Records { ref records } if records.len() == 1 && records[0].deleted));
         let pushed: Event = serde_json::from_str(r#"{"event":"pushed","keys":["a:b"]}"#).unwrap();
         assert!(matches!(pushed, Event::Pushed { .. }));
+        let reset: Event = serde_json::from_str(r#"{"event":"reset","reason":"zone"}"#).unwrap();
+        assert!(matches!(reset, Event::Reset { ref reason } if reason == "zone"));
+    }
+
+    fn todo(id: &str, created_at: u64) -> Todo {
+        Todo { id: id.into(), text: format!("line {id}"), created_at }
+    }
+
+    #[test]
+    fn catching_up_adopts_new_lines_at_the_time_they_were_written() {
+        let mut ledger = Ledger::new("mac".into());
+        let gone = catch_up_todos(&mut ledger, &[todo("a", 5), todo("b", 7)], 1_000);
+        assert!(gone.is_empty());
+        let mut queued: Vec<(String, u64)> =
+            ledger.take_outbox().into_iter().map(|record| (record.id, record.updated_at)).collect();
+        queued.sort();
+        assert_eq!(queued, vec![("a".to_string(), 5), ("b".to_string(), 7)]);
+    }
+
+    #[test]
+    fn a_line_ticked_off_while_sync_was_off_is_deleted_everywhere() {
+        let mut ledger = Ledger::new("mac".into());
+        catch_up_todos(&mut ledger, &[todo("a", 5), todo("b", 7)], 1_000);
+        let sent: Vec<String> = ledger.take_outbox().iter().map(Record::key).collect();
+        ledger.acknowledge(&sent);
+        // Sync off; "a" ticked off; sync on again.
+        catch_up_todos(&mut ledger, &[todo("b", 7)], 2_000);
+        let queued = ledger.take_outbox();
+        assert_eq!(queued.len(), 1);
+        assert_eq!((queued[0].id.as_str(), queued[0].deleted), ("a", true));
+    }
+
+    #[test]
+    fn a_line_deleted_on_the_phone_but_still_here_is_handed_back() {
+        let mut ledger = Ledger::new("mac".into());
+        catch_up_todos(&mut ledger, &[todo("a", 5)], 1_000);
+        // The phone's tombstone was taken in, then the app died before the list was saved.
+        ledger.apply_remote(vec![Record {
+            kind: TODO.into(),
+            id: "a".into(),
+            updated_at: 1_500,
+            device: "phone".into(),
+            deleted: true,
+            body: json!({}),
+            asset: None,
+        }]);
+        let gone = catch_up_todos(&mut ledger, &[todo("a", 5)], 2_000);
+        assert_eq!(gone, vec!["a".to_string()]);
     }
 
     #[test]

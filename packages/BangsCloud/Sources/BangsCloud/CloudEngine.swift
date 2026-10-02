@@ -29,6 +29,10 @@ public enum CloudEvent: Sendable {
     case rejected([String])
     /// Keys that could not be pushed right now; put them back and try again later.
     case failed(keys: [String], message: String, retryAfter: Int?)
+    /// The cloud no longer has what this device put there: "zone" (the zone was deleted, e.g.
+    /// Reset Development Environment) or "account" (another iCloud account is signed in).
+    /// Upload everything again; for "account", local data belongs to the old account.
+    case reset(String)
 }
 
 /// Every `pull()` and `push()` ends with exactly one status event: `syncing` when it starts,
@@ -40,6 +44,8 @@ public actor CloudEngine {
     public static let tokenFileName = "token.bin"
     /// Directory name, inside the state directory, of the downloaded CKAssets.
     public static let assetsDirectoryName = "assets"
+    /// File name, inside the state directory, of the iCloud user record the token belongs to.
+    public static let accountFileName = "account.txt"
 
     static let recordType = "BangsRecord"
     static let zoneName = "Bangs"
@@ -52,20 +58,26 @@ public actor CloudEngine {
     private let database: CKDatabase
     private let zoneID: CKRecordZone.ID
     private let stateDirectory: URL
+    private let keepAssets: Bool
     private let onEvent: @Sendable (CloudEvent) -> Void
 
     private var changeToken: CKServerChangeToken?
     private var tokenLoaded = false
     private var setupDone = false
     private var stopped = false
+    /// The zone went missing; the next successful setup reports `reset("zone")`.
+    private var zoneLost = false
 
     // pull() and push() run one at a time, in the order they were called.
     private var busy = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
 
+    /// `keepAssets: false` skips copying downloaded files: the Mac only ever gets back the shelf
+    /// files it uploaded itself.
     public init(
         containerID: String = "iCloud.com.gxlself.bangs",
         stateDirectory: URL,
+        keepAssets: Bool = true,
         onEvent: @escaping @Sendable (CloudEvent) -> Void
     ) {
         let container = CKContainer(identifier: containerID)
@@ -73,6 +85,7 @@ public actor CloudEngine {
         self.database = container.privateCloudDatabase
         self.zoneID = CKRecordZone.ID(zoneName: "Bangs", ownerName: CKCurrentUserDefaultName)
         self.stateDirectory = stateDirectory
+        self.keepAssets = keepAssets
         self.onEvent = onEvent
     }
 
@@ -101,12 +114,32 @@ public actor CloudEngine {
                 emit(.status(.unavailable))
                 return
             }
+            await checkAccount()
             try await ensureSetup()
             if stopped { return }
             emit(.status(.ready))
         } catch {
             emit(.status(statusFor(error)))
         }
+    }
+
+    /// A different iCloud account than last time: the saved token and everything this device
+    /// thinks is in the cloud belong to the old one.
+    private func checkAccount() async {
+        guard let recordID = try? await container.userRecordID() else { return }
+        let current = recordID.recordName
+        let url = stateDirectory.appendingPathComponent(CloudEngine.accountFileName)
+        let saved = (try? String(contentsOf: url, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if saved == current { return }
+        try? FileManager.default.createDirectory(at: stateDirectory, withIntermediateDirectories: true)
+        try? current.write(to: url, atomically: true, encoding: .utf8)
+        guard let saved = saved, !saved.isEmpty else { return }
+        changeToken = nil
+        tokenLoaded = true
+        saveToken()
+        setupDone = false
+        emit(.reset("account"))
     }
 
     /// Fetches everything that changed since the saved change token.
@@ -118,9 +151,11 @@ public actor CloudEngine {
         do {
             try await ensureSetup()
             try await fetchChanges()
+            if stopped { return }
             emit(.status(.idle))
         } catch {
-            emit(.status(.error(error.localizedDescription)))
+            if stopped { return }
+            emit(.status(statusFor(error)))
         }
     }
 
@@ -161,11 +196,11 @@ public actor CloudEngine {
         } catch {
             let message = error.localizedDescription
             emit(.failed(keys: order, message: message, retryAfter: retryAfterSeconds(of: error)))
-            emit(.status(.error(message)))
+            emit(.status(statusFor(error)))
             return
         }
 
-        var firstFailure: String? = nil
+        var firstFailure: CloudStatus? = nil
         var offset = 0
         while offset < unique.count {
             let end = min(offset + CloudEngine.maxBatch, unique.count)
@@ -175,11 +210,8 @@ public actor CloudEngine {
             }
             offset = end
         }
-        if let message = firstFailure {
-            emit(.status(.error(message)))
-        } else {
-            emit(.status(.idle))
-        }
+        if stopped { return }
+        emit(.status(firstFailure ?? .idle))
     }
 
     /// Stops reporting; queued and later calls do nothing. `start()` revives the engine.
@@ -230,6 +262,13 @@ public actor CloudEngine {
         }
 
         setupDone = true
+        if zoneLost {
+            zoneLost = false
+            changeToken = nil
+            tokenLoaded = true
+            saveToken()
+            emit(.reset("zone"))
+        }
     }
 
     private func statusFor(_ error: Error) -> CloudStatus {
@@ -237,6 +276,22 @@ public actor CloudEngine {
             return .noAccount
         }
         return .error(error.localizedDescription)
+    }
+
+    /// Errors a retry will not fix. Reported as `rejected` so they do not hold up every
+    /// later change.
+    private func isPermanent(_ error: Error) -> Bool {
+        guard let ckError = error as? CKError else { return false }
+        switch ckError.code {
+        case .invalidArguments, .assetFileNotFound, .permissionFailure:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func log(_ message: String) {
+        FileHandle.standardError.write(Data(("BangsCloud: " + message + "\n").utf8))
     }
 
     // MARK: Pulling
@@ -260,6 +315,9 @@ public actor CloudEngine {
                     changeToken = nil
                     saveToken()
                 case .zoneNotFound, .userDeletedZone:
+                    // ensureSetup recreates it and reports reset("zone"), so the caller puts
+                    // everything back; the fetch then starts from an empty zone.
+                    zoneLost = true
                     changeToken = nil
                     saveToken()
                     setupDone = false
@@ -274,6 +332,7 @@ public actor CloudEngine {
     private func fetchPages() async throws {
         var more = true
         while more {
+            if stopped { return }
             let result = try await database.recordZoneChanges(
                 inZoneWith: zoneID,
                 since: changeToken,
@@ -292,6 +351,8 @@ public actor CloudEngine {
                 if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt < rhs.updatedAt }
                 return lhs.key < rhs.key
             }
+            // Stopped meanwhile: nobody takes these, so the token must not move past them.
+            if stopped { return }
             if !batch.isEmpty {
                 emit(.records(batch))
             }
@@ -304,8 +365,8 @@ public actor CloudEngine {
     // MARK: Pushing
 
     /// Pushes up to `maxBatch` records. Emits pushed / rejected / records / failed, and returns
-    /// the first failure message, if any.
-    private func pushBatch(_ batch: [SyncRecord]) async -> String? {
+    /// the status the push should end with when something failed.
+    private func pushBatch(_ batch: [SyncRecord]) async -> CloudStatus? {
         var ours: [String: SyncRecord] = [:]
         var toSave: [CKRecord] = []
         for record in batch {
@@ -318,6 +379,7 @@ public actor CloudEngine {
         var winners: [SyncRecord] = []
         var failedKeys: [String] = []
         var failureMessage: String? = nil
+        var failureStatus: CloudStatus? = nil
         var failureRetry: Int? = nil
 
         func noteFailure(key: String, message: String, retryAfter: Int?) {
@@ -368,9 +430,13 @@ public actor CloudEngine {
                                     winners.append(winner)
                                 }
                             }
+                        } else if isPermanent(error) {
+                            log("dropping \(key): \(error.localizedDescription)")
+                            rejected.append(key)
                         } else {
                             if isMissingZone(error) {
                                 setupDone = false
+                                zoneLost = true
                             }
                             noteFailure(key: key, message: error.localizedDescription, retryAfter: retryAfterSeconds(of: error))
                         }
@@ -381,7 +447,9 @@ public actor CloudEngine {
                 // The whole request failed (network, account, throttling, ...).
                 if isMissingZone(error) {
                     setupDone = false
+                    zoneLost = true
                 }
+                failureStatus = statusFor(error)
                 let message = error.localizedDescription
                 let retry = retryAfterSeconds(of: error)
                 for record in toSave {
@@ -403,7 +471,13 @@ public actor CloudEngine {
         if !failedKeys.isEmpty {
             emit(.failed(keys: failedKeys, message: failureMessage ?? "Push failed", retryAfter: failureRetry))
         }
-        return failureMessage
+        if let status = failureStatus {
+            return status
+        }
+        if let message = failureMessage {
+            return .error(message)
+        }
+        return nil
     }
 
     // MARK: CKRecord <-> SyncRecord
@@ -461,7 +535,7 @@ public actor CloudEngine {
         }
 
         var assetPath: String? = nil
-        if !deleted, let asset = ckRecord["asset"] as? CKAsset {
+        if keepAssets, !deleted, let asset = ckRecord["asset"] as? CKAsset {
             assetPath = copyAsset(asset, recordName: name)
         }
 
@@ -486,6 +560,11 @@ public actor CloudEngine {
         let destination = directory.appendingPathComponent(fileName)
         do {
             try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+            // Copies of files that live in iCloud anyway: not worth a place in the backup.
+            var folder = directory
+            var values = URLResourceValues()
+            values.isExcludedFromBackup = true
+            try? folder.setResourceValues(values)
             if fileManager.fileExists(atPath: destination.path) {
                 try fileManager.removeItem(at: destination)
             }

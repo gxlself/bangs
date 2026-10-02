@@ -109,7 +109,8 @@ fn publish(app: &AppHandle, next: ClipboardState) {
 
 /// The whole text of these text entries, by id, for sync: the panel itself
 /// only ever holds a preview. Pictures and files have no entry in the result.
-pub fn full_texts(app: &AppHandle, ids: &[i64]) -> std::collections::HashMap<i64, String> {
+/// `None` when the history cannot be read right now.
+pub fn full_texts(app: &AppHandle, ids: &[i64]) -> Option<std::collections::HashMap<i64, String>> {
     #[cfg(target_os = "macos")]
     {
         let _ = app;
@@ -120,7 +121,7 @@ pub fn full_texts(app: &AppHandle, ids: &[i64]) -> std::collections::HashMap<i64
     #[cfg(not(any(target_os = "macos", windows)))]
     {
         let _ = (app, ids);
-        std::collections::HashMap::new()
+        None
     }
 }
 

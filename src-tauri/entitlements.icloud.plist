@@ -20,6 +20,11 @@
   <array>
     <string>CloudKit</string>
   </array>
+  <!-- Which CloudKit database: a Developer ID app has to name it (Xcode adds
+       this on a Developer ID export); the iPhone app on TestFlight or the App
+       Store is on Production, the one run from Xcode on Development. -->
+  <key>com.apple.developer.icloud-container-environment</key>
+  <string>Production</string>
   <key>com.apple.developer.aps-environment</key>
   <string>production</string>
 </dict>

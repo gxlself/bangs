@@ -109,17 +109,31 @@ public struct RecordStore: Codable, Equatable, Sendable {
 
     // MARK: Pushing
 
-    /// Hands out the pending changes (oldest first) and remembers them as in flight.
+    /// Hands out the pending changes (oldest first) and remembers them as in flight. A key that
+    /// is already in flight stays in the outbox until that push is settled: otherwise its newer
+    /// version would replace the in-flight one, and the answer about the older push would settle
+    /// the newer change without it ever being sent.
     public mutating func takeOutbox() -> [SyncRecord] {
-        let batch = outbox.values.sorted { lhs, rhs in
-            if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt < rhs.updatedAt }
-            return lhs.key < rhs.key
-        }
+        let batch = outbox.values
+            .filter { inflight[$0.key] == nil }
+            .sorted { lhs, rhs in
+                if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt < rhs.updatedAt }
+                return lhs.key < rhs.key
+            }
         for record in batch {
             inflight[record.key] = record
+            outbox[record.key] = nil
         }
-        outbox = [:]
         return batch
+    }
+
+    /// Queues every live record of `kind` again, unchanged: the cloud lost them (a reset zone).
+    public mutating func requeue(kind: String) {
+        for record in records.values where record.kind == kind && !record.deleted {
+            if inflight[record.key] == nil {
+                outbox[record.key] = record
+            }
+        }
     }
 
     /// Puts records from a failed push back into the outbox, unless their key has moved on
