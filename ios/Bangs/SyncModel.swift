@@ -99,10 +99,10 @@ final class SyncModel: ObservableObject {
         let engine = CloudEngine(
             containerID: SyncModel.containerID,
             stateDirectory: stateDirectory,
+            // Awaited by the engine: events are handled one at a time, in order, and the records
+            // of a page are in store.json before the engine saves the change token past them.
             onEvent: { [weak self] event in
-                Task { @MainActor in
-                    self?.handle(event)
-                }
+                await self?.handle(event)
             }
         )
         self.engine = engine

@@ -26,7 +26,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: swift --version
-      - run: swift test --package-path packages/BangsCloud
+      - name: Build
+        run: |
+          set -o pipefail
+          swift build --package-path packages/BangsCloud --build-tests 2>&1 | tee build.log
+      - run: swift test --package-path packages/BangsCloud --skip-build
+      - name: Warnings
+        if: always()
+        run: grep -E "warning:" build.log | sort -u || echo "No warnings."
 
   ios-app:
     name: iPhone app (xcodebuild, simulator)
@@ -40,11 +47,17 @@ jobs:
         working-directory: ios
         run: |
           xcodebuild -version
+          status=0
           xcodebuild -project Bangs.xcodeproj -scheme Bangs \
             -destination 'generic/platform=iOS Simulator' \
             -configuration Debug \
             CODE_SIGNING_ALLOWED=NO \
-            build
+            build > build.log 2>&1 || status=$?
+          echo "--- errors and warnings ---"
+          grep -E "(error|warning):" build.log | sort -u | head -150 || echo "None."
+          echo "---"
+          tail -3 build.log
+          exit $status
 
   mac-app:
     name: macOS app (cargo, --features icloud)
@@ -71,5 +84,7 @@ jobs:
       - name: Build and test with the Swift bridge linked in
         working-directory: src-tauri
         run: |
+          set -o pipefail
           cargo test --lib --features icloud
-          cargo build --features icloud
+          cargo build --features icloud 2>&1 | tee build.log
+          grep -E "^warning" -A4 build.log || echo "No warnings."
