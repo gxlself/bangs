@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Bangs 隐私政策 · Privacy Policy</title>
+    <meta name="description" content="Bangs（Mac、Windows 和 iPhone / iPad）的隐私政策：开发者不收集任何数据。" />
+    <link rel="icon" href="favicon.svg" />
+    <style>
+      :root {
+        --bg: #fbfbfd;
+        --fg: #1d1d1f;
+        --muted: #6e6e73;
+        --line: #e5e5ea;
+        --accent: #16a34a;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0b0b0f;
+          --fg: #f5f5f7;
+          --muted: #a1a1a6;
+          --line: #2c2c2e;
+          --accent: #4ade80;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--fg);
+        font: 16px/1.7 -apple-system, BlinkMacSystemFont, "Inter", "PingFang SC", "Helvetica Neue", sans-serif;
+      }
+      main { max-width: 720px; margin: 0 auto; padding: 48px 16px 80px; }
+      h1 { font-size: 30px; line-height: 1.25; margin: 0 0 4px; }
+      h2 { font-size: 19px; margin: 32px 0 8px; }
+      p, li { color: var(--fg); }
+      .muted { color: var(--muted); font-size: 14px; }
+      a { color: var(--accent); }
+      hr { border: 0; border-top: 1px solid var(--line); margin: 48px 0; }
+      ul { padding-left: 1.2em; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Bangs 隐私政策</h1>
+      <p class="muted">适用于 Bangs 的 Mac、Windows 和 iPhone / iPad 版 · 更新于 2026 年 10 月 3 日</p>
+
+      <p><strong>开发者不收集任何数据。</strong>Bangs 没有自己的服务器，没有账号系统，不接入统计、广告或追踪 SDK，也不会把你的内容发给开发者。</p>
+
+      <h2>iCloud 同步（Mac ↔ iPhone / iPad）</h2>
+      <p>打开同步后，待办、Claude Code / Codex 会话状态、最近的剪贴板和暂存架文件通过 Apple 的 CloudKit 存在<strong>你自己的 iCloud 私有数据库</strong>里，只有登录同一个 Apple ID 的设备能读到。待办、剪贴板文字和复制的图片使用 CloudKit 的端到端加密；暂存架里的文件由 Apple 按 iCloud 的标准加密保存。开发者看不到这些数据。同步默认关闭，在 Mac 的托盘菜单里打开或关闭；关闭后不再上传，已上传的内容可以在「设置 → [你的名字] → iCloud → 管理储存空间」里删除。</p>
+
+      <h2>通知</h2>
+      <p>iPhone 上「Claude 在等你」的提醒是 App 在本机生成的本地通知，不经过任何第三方推送服务。</p>
+
+      <h2>Mac / Windows 版会访问的网络服务</h2>
+      <ul>
+        <li>显示歌词时，把正在播放的歌名和歌手发给网易云音乐或 QQ 音乐的公开歌词接口来查找歌词。</li>
+        <li>托盘菜单检查新版本时，访问 GitHub 上 Bangs 的发布页。</li>
+      </ul>
+      <p>这些请求不包含任何能识别你身份的信息，Bangs 也不保存请求记录以外的数据。剪贴板历史由你本机的 Paste App 管理，Bangs 只在本机读取。</p>
+
+      <h2>儿童</h2>
+      <p>Bangs 不面向儿童，也不收集任何人的个人信息。</p>
+
+      <h2>联系</h2>
+      <p>有问题请在 <a href="https://github.com/gxlself/bangs/issues">GitHub Issues</a> 提出。</p>
+
+      <hr />
+
+      <h1>Bangs Privacy Policy</h1>
+      <p class="muted">Applies to Bangs for Mac, Windows and iPhone / iPad · Updated October 3, 2026</p>
+
+      <p><strong>The developer collects no data.</strong> Bangs has no server of its own, no accounts, no analytics, advertising or tracking SDKs, and never sends your content to the developer.</p>
+
+      <h2>iCloud sync (Mac ↔ iPhone / iPad)</h2>
+      <p>When sync is on, your to-dos, Claude Code / Codex session status, recent clipboard entries and shelf files are stored with Apple's CloudKit in <strong>your own private iCloud database</strong>, readable only by devices signed in to the same Apple ID. To-dos, clipboard text and copied pictures use CloudKit's end-to-end encryption; shelf files are stored with iCloud's standard encryption. The developer cannot see any of it. Sync is off by default and is switched on and off from the Mac's menu bar menu; once off, nothing more is uploaded, and what was uploaded can be deleted in Settings → [your name] → iCloud → Manage Storage.</p>
+
+      <h2>Notifications</h2>
+      <p>The "Claude is waiting" alert on iPhone is a local notification made by the app on the device; no third-party push service is involved.</p>
+
+      <h2>Network services used by the Mac / Windows app</h2>
+      <ul>
+        <li>To show lyrics, the title and artist of the song that is playing are sent to the public lyrics endpoints of NetEase Cloud Music or QQ Music.</li>
+        <li>To check for a new version, the menu bar menu reads Bangs' releases page on GitHub.</li>
+      </ul>
+      <p>These requests carry nothing that identifies you. The clipboard history is managed by the Paste app on your Mac; Bangs only reads it locally.</p>
+
+      <h2>Children</h2>
+      <p>Bangs is not directed at children and collects no personal information from anyone.</p>
+
+      <h2>Contact</h2>
+      <p>Open an issue on <a href="https://github.com/gxlself/bangs/issues">GitHub</a>.</p>
+    </main>
+  </body>
+</html>
