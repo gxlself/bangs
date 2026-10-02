@@ -6,26 +6,34 @@ enum Format {
         return Date(timeIntervalSince1970: Double(ms) / 1000)
     }
 
-    /// "3 min ago" / "3 分钟前". A time slightly in the future (clock skew) reads as now.
-    static func relative(_ ms: Int64) -> String {
+    private static let relativeFormatter: RelativeDateTimeFormatter = {
         let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .short
+        formatter.unitsStyle = .full
+        formatter.dateTimeStyle = .named
         formatter.locale = Locale(identifier: t("zh-Hans", "en"))
-        let now = Date()
-        let then = min(date(fromMillis: ms), now)
-        return formatter.localizedString(for: then, relativeTo: now)
+        return formatter
+    }()
+
+    /// "just now" / "刚刚" for the last minute (and a clock a little ahead), then "3 minutes
+    /// ago" / "3 分钟前" — the Mac's words.
+    static func relative(_ ms: Int64, now: Date = Date()) -> String {
+        let then = date(fromMillis: ms)
+        if now.timeIntervalSince(then) < 60 {
+            return t("刚刚", "just now")
+        }
+        return relativeFormatter.localizedString(for: then, relativeTo: now)
+    }
+
+    static func relative(_ date: Date, now: Date = Date()) -> String {
+        return relative(Int64(date.timeIntervalSince1970 * 1000), now: now)
     }
 
     static func bytes(_ count: Int64) -> String {
         return ByteCountFormatter.string(fromByteCount: count, countStyle: .file)
     }
 
-    static func lastSync(_ date: Date?) -> String {
+    static func lastSync(_ date: Date?, now: Date = Date()) -> String {
         guard let date = date else { return t("还没同步过", "Not synced yet") }
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: t("zh-Hans", "en"))
-        formatter.dateStyle = .medium
-        formatter.timeStyle = .short
-        return formatter.string(from: date)
+        return relative(date, now: now)
     }
 }

@@ -1,4 +1,4 @@
-use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
+use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager, Wry};
 use tauri_plugin_autostart::ManagerExt as _;
@@ -60,32 +60,65 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
         )?)?;
     }
 
-    Menu::with_items(
+    let visible = CheckMenuItem::with_id(app, "visible", t("显示刘海", "Show the notch"), true, settings.visible, None::<&str>)?;
+    let hover = CheckMenuItem::with_id(app, "hover", t("悬停时展开", "Expand on hover"), true, settings.expand_on_hover, None::<&str>)?;
+    let idle_handle =
+        CheckMenuItem::with_id(app, "idle-handle", t("空闲时收成细条", "Shrink to a bar when idle"), true, settings.idle_handle, None::<&str>)?;
+    #[cfg(windows)]
+    let clipboard_history =
+        CheckMenuItem::with_id(app, "clipboard-history", t("记录剪贴板", "Record the clipboard"), true, settings.clipboard_history, None::<&str>)?;
+    let lyrics = CheckMenuItem::with_id(app, "lyrics", t("显示歌词", "Show lyrics"), true, settings.lyrics_enabled, None::<&str>)?;
+    let lyrics_translation = CheckMenuItem::with_id(
         app,
-        &[
-            &CheckMenuItem::with_id(app, "visible", t("显示刘海", "Show the notch"), true, settings.visible, None::<&str>)?,
-            &CheckMenuItem::with_id(app, "hover", t("悬停时展开", "Expand on hover"), true, settings.expand_on_hover, None::<&str>)?,
-            &CheckMenuItem::with_id(app, "idle-handle", t("空闲时收成细条", "Shrink to a bar when idle"), true, settings.idle_handle, None::<&str>)?,
-            #[cfg(windows)]
-            &CheckMenuItem::with_id(app, "clipboard-history", t("记录剪贴板", "Record the clipboard"), true, settings.clipboard_history, None::<&str>)?,
-            #[cfg(target_os = "macos")]
-            &CheckMenuItem::with_id(app, "icloud-sync", t("同步到 iPhone（iCloud）", "Sync with iPhone (iCloud)"), sync.supported, settings.icloud_sync && sync.supported, None::<&str>)?,
-            #[cfg(target_os = "macos")]
-            &MenuItem::with_id(app, "icloud-status", format!("    {}", sync::status_label(&sync)), false, None::<&str>)?,
-            #[cfg(target_os = "macos")]
-            &MenuItem::with_id(app, "icloud-sync-now", format!("    {}", t("立即同步", "Sync now")), sync.enabled, None::<&str>)?,
-            &CheckMenuItem::with_id(app, "lyrics", t("显示歌词", "Show lyrics"), true, settings.lyrics_enabled, None::<&str>)?,
-            &CheckMenuItem::with_id(app, "lyrics-translation", t("显示歌词翻译", "Show lyric translations"), settings.lyrics_enabled, settings.lyrics_translation_enabled, None::<&str>)?,
-            &CheckMenuItem::with_id(app, "notify-claude", t("Claude 忙完时提醒", "Alert when Claude finishes"), true, settings.notify_claude_idle, None::<&str>)?,
-            &display,
-            &language,
-            &PredefinedMenuItem::separator(app)?,
-            &CheckMenuItem::with_id(app, "autostart", t("开机启动", "Launch at login"), true, autostart, None::<&str>)?,
-            &PredefinedMenuItem::separator(app)?,
-            &MenuItem::with_id(app, "version", update::menu_label(app), true, None::<&str>)?,
-            &MenuItem::with_id(app, "quit", t("退出", "Quit"), true, None::<&str>)?,
-        ],
-    )
+        "lyrics-translation",
+        t("显示歌词翻译", "Show lyric translations"),
+        settings.lyrics_enabled,
+        settings.lyrics_translation_enabled,
+        None::<&str>,
+    )?;
+    let notify_claude =
+        CheckMenuItem::with_id(app, "notify-claude", t("Claude 忙完时提醒", "Alert when Claude finishes"), true, settings.notify_claude_idle, None::<&str>)?;
+    let autostart = CheckMenuItem::with_id(app, "autostart", t("开机启动", "Launch at login"), true, autostart, None::<&str>)?;
+    let version = MenuItem::with_id(app, "version", update::menu_label(app), true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", t("退出", "Quit"), true, None::<&str>)?;
+    let separator = PredefinedMenuItem::separator(app)?;
+    let separator_end = PredefinedMenuItem::separator(app)?;
+
+    let mut items: Vec<&dyn IsMenuItem<Wry>> = vec![&visible, &hover, &idle_handle];
+    #[cfg(windows)]
+    items.push(&clipboard_history);
+    items.extend([&lyrics as &dyn IsMenuItem<Wry>, &lyrics_translation, &notify_claude, &display, &language]);
+
+    // Sync with the iPhone, a group of its own: only on a build that can reach
+    // iCloud at all, and the status and "Sync now" only while it is on.
+    #[cfg(target_os = "macos")]
+    let sync_items = if sync.supported {
+        let toggle = CheckMenuItem::with_id(
+            app,
+            "icloud-sync",
+            t("与 iPhone 同步（iCloud）", "Sync with iPhone (iCloud)"),
+            true,
+            settings.icloud_sync,
+            None::<&str>,
+        )?;
+        let status = MenuItem::with_id(app, "icloud-status", format!("    {}", sync::status_label(&sync)), false, None::<&str>)?;
+        let now = MenuItem::with_id(app, "icloud-sync-now", format!("    {}", t("立即同步", "Sync now")), true, None::<&str>)?;
+        Some((PredefinedMenuItem::separator(app)?, toggle, status, now))
+    } else {
+        None
+    };
+    #[cfg(target_os = "macos")]
+    if let Some((separator, toggle, status, now)) = &sync_items {
+        items.push(separator);
+        items.push(toggle);
+        if sync.enabled {
+            items.push(status);
+            items.push(now);
+        }
+    }
+
+    items.extend([&separator as &dyn IsMenuItem<Wry>, &autostart, &separator_end, &version, &quit]);
+    Menu::with_items(app, &items)
 }
 
 pub fn create(app: &AppHandle) -> tauri::Result<()> {

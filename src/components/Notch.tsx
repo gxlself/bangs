@@ -10,13 +10,12 @@ import { elapsedAt, isMediaLive, useMedia } from "../store/media";
 import { useActivities } from "../store/activities";
 import { useNotch } from "../store/notch";
 import { useShelf } from "../store/shelf";
-import { useTodos } from "../store/todos";
+import { TODO_REMINDER_MS, useTodos } from "../store/todos";
 import { CompactView, type Activity } from "./CompactView";
 import { DropView } from "./DropView";
 import { ExpandedView } from "./ExpandedView";
 
 /** How long a new to-do stays beside the collapsed notch. */
-const TODO_REMINDER_MS = 5 * 60_000;
 
 export function Notch() {
   const mode = useNotch((s) => s.mode);

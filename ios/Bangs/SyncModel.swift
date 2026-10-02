@@ -39,6 +39,21 @@ enum AppTab: Hashable {
     case shelf
 }
 
+/// Why a tab that shows the Mac's things is empty.
+enum EmptyReason {
+    /// The first pull has not come back yet.
+    case loading
+    /// This iPhone is not signed in to iCloud.
+    case notSignedIn
+    /// A Mac syncs, and simply has nothing of this kind.
+    case macConnected
+    /// No Mac has synced anything yet.
+    case noMac
+}
+
+/// The most open to-dos the list takes; in step with MAX_TODOS in src-tauri/src/todos.rs.
+let maxOpenTodos = 60
+
 /// A waiting session older than this is not news: a first full sync must not announce
 /// yesterday's questions.
 private let waitingNewsMs: Int64 = 10 * 60 * 1000
@@ -61,6 +76,8 @@ final class SyncModel: ObservableObject {
     @Published private(set) var shelf: [ShelfItem] = []
     /// Short device id of each Mac → when it last said it was there (its heartbeat).
     @Published private(set) var deviceSeen: [String: Int64] = [:]
+    /// The Macs that sync, most recently seen first.
+    @Published private(set) var devices: [DeviceItem] = []
     @Published private(set) var status: CloudStatus = .starting
     @Published private(set) var lastSync: Date? = nil
     @Published var selectedTab: AppTab = .todo
@@ -232,7 +249,7 @@ final class SyncModel: ObservableObject {
     @discardableResult
     func addTodo(_ raw: String) -> Bool {
         let text = SyncModel.cleanTodo(raw)
-        if text.isEmpty { return false }
+        if text.isEmpty || todoListFull { return false }
         let now = nowMillis()
         let item = TodoItem(id: UUID().uuidString.lowercased(), text: text, createdAt: now)
         let record = store.localUpsert(kind: "todo", id: item.id, body: item.body, asset: nil, now: now, device: deviceID)
@@ -256,11 +273,12 @@ final class SyncModel: ObservableObject {
         changed()
     }
 
-    /// Deletes every done line.
-    func clearCompletedTodos() {
+    /// Deletes these lines; with `onlyIfDone`, only those still done — "Clear done" deletes
+    /// what was done when it was asked, not a line ticked or unticked meanwhile.
+    func deleteTodos(ids: [String], onlyIfDone: Bool) {
         let now = nowMillis()
         var any = false
-        for item in todos where item.done {
+        for item in todos where ids.contains(item.id) && (!onlyIfDone || item.done) {
             if store.localDelete(kind: "todo", id: item.id, now: now, device: deviceID) != nil {
                 any = true
             }
@@ -414,6 +432,32 @@ final class SyncModel: ObservableObject {
 
     // MARK: Macs
 
+    /// What to do on the Mac, in the words of its menu.
+    static let turnOnOnMac = t(
+        "在 Mac 上点菜单栏里的 Bangs 图标，打开「与 iPhone 同步（iCloud）」。",
+        "On your Mac, click Bangs in the menu bar and turn on Sync with iPhone (iCloud)."
+    )
+
+    var emptyReason: EmptyReason {
+        switch status {
+        case .starting:
+            return .loading
+        case .noAccount:
+            return .notSignedIn
+        case .ready, .syncing:
+            if lastSync == nil { return .loading }
+        default:
+            break
+        }
+        let anyMac = !devices.isEmpty || !sessions.isEmpty || !clips.isEmpty || !shelf.isEmpty
+        return anyMac ? .macConnected : .noMac
+    }
+
+    /// The list holds this many open lines at most, like the notch.
+    var todoListFull: Bool {
+        return todos.filter { !$0.done }.count >= maxOpenTodos
+    }
+
     /// Whether a Mac was heard from lately. One that never sent a heartbeat (an older Bangs)
     /// counts as there.
     func isOnline(_ deviceID: String, at date: Date = Date()) -> Bool {
@@ -448,6 +492,15 @@ final class SyncModel: ObservableObject {
             default:
                 notificationsDenied = false
             }
+        }
+    }
+
+    /// Whether the system still says no, read again when it may have changed: Settings opened,
+    /// the app back in front (the user may have just been to the system settings).
+    func refreshNotificationStatus() {
+        Task {
+            let settings = await UNUserNotificationCenter.current().notificationSettings()
+            notificationsDenied = settings.authorizationStatus == .denied
         }
     }
 
@@ -521,11 +574,12 @@ final class SyncModel: ObservableObject {
         shelf = store.live(kind: "shelf")
             .compactMap { ShelfItem(record: $0) }
             .sorted(by: ShelfItem.isOrderedBefore)
+        devices = store.live(kind: "device")
+            .compactMap { DeviceItem(record: $0) }
+            .sorted { $0.seenAt > $1.seenAt }
         var seen: [String: Int64] = [:]
-        for record in store.live(kind: "device") {
-            if let at = record.body["seenAt"]?.int64Value {
-                seen[record.id] = at
-            }
+        for device in devices {
+            seen[device.id] = device.seenAt
         }
         deviceSeen = seen
     }

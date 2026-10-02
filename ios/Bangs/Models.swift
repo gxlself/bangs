@@ -190,6 +190,27 @@ struct SessionGroup: Identifiable {
     }
 }
 
+// MARK: - device
+
+/// A Mac that syncs, from its heartbeat record.
+struct DeviceItem: Identifiable, Equatable {
+    /// The short device id, also the prefix of its mirrored records' ids.
+    let id: String
+    let host: String
+    let seenAt: Int64
+
+    init?(record: SyncRecord) {
+        guard record.kind == "device", !record.deleted,
+              let seenAt = record.body["seenAt"]?.int64Value
+        else {
+            return nil
+        }
+        self.id = record.id
+        self.host = record.body["host"]?.stringValue ?? ""
+        self.seenAt = seenAt
+    }
+}
+
 // MARK: - clip
 
 private struct ClipBody: Codable {

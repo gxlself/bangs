@@ -18,7 +18,7 @@ struct RootView: View {
                 DevView()
             }
             .tabItem {
-                Label(t("开发", "Dev"), systemImage: "terminal")
+                Label(t("代码", "Code"), systemImage: "terminal")
             }
             .badge(waitingCount)
             .tag(AppTab.dev)
@@ -35,7 +35,7 @@ struct RootView: View {
                 ShelfView()
             }
             .tabItem {
-                Label(t("文件架", "Shelf"), systemImage: "tray.full")
+                Label(t("暂存", "Shelf"), systemImage: "tray.full")
             }
             .tag(AppTab.shelf)
         }
@@ -45,6 +45,10 @@ struct RootView: View {
         }
         .onChange(of: scenePhase) { phase in
             model.setActive(phase == .active)
+            if phase == .active {
+                // Back from the system settings, maybe with notifications allowed now.
+                model.refreshNotificationStatus()
+            }
         }
     }
 

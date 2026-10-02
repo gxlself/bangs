@@ -3,40 +3,45 @@ import SwiftUI
 struct ShelfView: View {
     @EnvironmentObject private var model: SyncModel
     @State private var preview: PreviewFile?
+    @State private var toast: Toast?
 
     var body: some View {
         Group {
             if model.shelf.isEmpty {
                 // Scrollable, so pull-to-refresh works before there is anything to show.
                 ScrollView {
-                    EmptyStateView(
+                    SyncEmptyState(
                         symbol: "tray.full",
-                        title: t("文件架是空的", "The shelf is empty"),
-                        message: t(
-                            "放进 Mac 文件架的文件会出现在这里，25 MB 以内的可以直接预览。Mac 上的 Bangs 需要打开 iCloud 同步。",
-                            "Files you put on the shelf on your Mac show up here; files up to 25 MB can be previewed. Bangs on your Mac needs iCloud sync turned on."
+                        title: t("暂存架是空的", "The shelf is empty"),
+                        connectedButEmpty: t(
+                            "Mac 的暂存架上没有文件。拖到刘海上暂存的文件会出现在这里，25 MB 以内的可以直接预览。",
+                            "Nothing is on your Mac's shelf. Files you drop on the notch show up here; files up to 25 MB can be previewed."
                         )
                     )
-                        .padding(.top, 96)
+                    .padding(.top, 96)
                 }
                 .refreshable {
                     await model.syncNow()
                 }
             } else {
-                List {
-                    ForEach(model.shelf) { item in
-                        Button {
-                            open(item)
-                        } label: {
-                            ShelfRow(
-                                item: item,
-                                state: state(of: item),
-                                picture: state(of: item) == .available
-                                    ? AssetFiles.url(forKey: item.id, stateDirectory: model.stateDirectory)
-                                    : nil
-                            )
+                // Redrawn every minute, so "3 minutes ago" stays true.
+                TimelineView(.everyMinute) { context in
+                    List {
+                        ForEach(model.shelf) { item in
+                            let fileState = state(of: item)
+                            Button {
+                                open(item)
+                            } label: {
+                                ShelfRow(
+                                    item: item,
+                                    state: fileState,
+                                    picture: fileState == .available
+                                        ? AssetFiles.url(forKey: item.id, stateDirectory: model.stateDirectory)
+                                        : nil,
+                                    now: context.date
+                                )
+                            }
                         }
-                        .buttonStyle(.plain)
                     }
                 }
                 .listStyle(.insetGrouped)
@@ -45,11 +50,12 @@ struct ShelfView: View {
                 }
             }
         }
-        .navigationTitle(t("文件架", "Shelf"))
+        .navigationTitle(t("暂存架", "Shelf"))
         .sheet(item: $preview) { file in
             QuickLookPreview(url: file.url)
                 .ignoresSafeArea()
         }
+        .toast($toast)
         .settingsButton()
     }
 
@@ -62,9 +68,17 @@ struct ShelfView: View {
     }
 
     private func open(_ item: ShelfItem) {
-        guard state(of: item) == .available else { return }
-        if let url = AssetFiles.previewCopy(for: item, stateDirectory: model.stateDirectory) {
-            preview = PreviewFile(url: url)
+        switch state(of: item) {
+        case .available:
+            if let url = AssetFiles.previewCopy(for: item, stateDirectory: model.stateDirectory) {
+                preview = PreviewFile(url: url)
+            } else {
+                toast = Toast(text: t("打不开这个文件", "Couldn't open this file"), success: false)
+            }
+        case .tooLarge:
+            toast = Toast(text: t("超过 25 MB 的文件只能在 Mac 上打开", "Files over 25 MB stay on the Mac"), success: false)
+        case .downloading:
+            toast = Toast(text: t("还在下载，稍等一下", "Still downloading"), success: false)
         }
     }
 }
@@ -80,6 +94,7 @@ private struct ShelfRow: View {
     let state: ShelfFileState
     /// The downloaded file, when there is one.
     let picture: URL?
+    let now: Date
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
@@ -95,6 +110,7 @@ private struct ShelfRow: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(item.name)
                     .font(.body)
+                    .foregroundStyle(.primary)
                     .lineLimit(2)
                 Text(details)
                     .font(.caption)
@@ -103,7 +119,7 @@ private struct ShelfRow: View {
                 if let caption = caption {
                     Text(caption)
                         .font(.caption)
-                        .foregroundColor(.orange)
+                        .foregroundStyle(.secondary)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -112,10 +128,16 @@ private struct ShelfRow: View {
                 Image(systemName: "eye")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
+            } else if state == .downloading {
+                ProgressView()
+                    .controlSize(.small)
             }
         }
         .padding(.vertical, 2)
         .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+        .accessibilityHint(state == .available ? t("预览", "Previews it") : "")
     }
 
     private var details: String {
@@ -123,7 +145,7 @@ private struct ShelfRow: View {
         if !item.host.isEmpty {
             parts.append(item.host)
         }
-        parts.append(Format.relative(item.addedAt))
+        parts.append(Format.relative(item.addedAt, now: now))
         return parts.joined(separator: " · ")
     }
 
@@ -134,7 +156,7 @@ private struct ShelfRow: View {
         case .tooLarge:
             return t("太大，未同步", "Too large to sync")
         case .downloading:
-            return t("等待下载…", "Downloading…")
+            return t("下载中…", "Downloading…")
         }
     }
 }

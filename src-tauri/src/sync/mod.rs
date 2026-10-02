@@ -161,12 +161,11 @@ pub fn status_label(status: &SyncStatus) -> String {
         // Every pull is a syncing → idle; the menu does not need to know.
         "ready" | "idle" | "syncing" => t("已连接，改动会自动同步", "Connected; changes sync on their own").into(),
         "noAccount" => t("这台 Mac 没有登录 iCloud", "This Mac is not signed in to iCloud").into(),
-        "restricted" => t("iCloud 被限制了", "iCloud is restricted").into(),
-        "unavailable" => t("iCloud 暂时用不了", "iCloud is unavailable right now").into(),
-        _ => {
-            let reason = status.message.as_deref().unwrap_or("");
-            format!("{}{reason}", t("同步出错：", "Sync error: "))
-        }
+        "restricted" => t("iCloud 被限制", "iCloud is restricted").into(),
+        "unavailable" => t("iCloud 暂时不可用", "iCloud is temporarily unavailable").into(),
+        // The detail is CloudKit's English and is in the log already; the menu
+        // only needs to say that it will sort itself out.
+        _ => t("暂时没能同步，稍后会自动重试", "Couldn't sync; trying again shortly").into(),
     }
 }
 
@@ -262,14 +261,16 @@ fn catch_up_todos(ledger: &mut Ledger, todos: &[Todo], now: u64) -> Vec<String> 
             ledger.local_delete(TODO, &id, now);
         }
     }
-    // New since: stamped with the day they were written, not today, so they
-    // never beat a later edit made elsewhere.
-    for todo in todos {
-        if todo.id == clean_id(&todo.id) && !ledger.has_version(TODO, &todo.id) {
-            ledger.local_upsert(TODO, &todo.id, todo_body(todo), None, todo.created_at);
-        }
-    }
+    // New or changed since (added, ticked, unticked): stamped with when that
+    // happened rather than now, so it never beats a later edit made elsewhere.
+    // An unchanged line is a no-op.
     let deleted = ledger.deleted_ids(TODO);
+    for todo in todos {
+        if todo.id != clean_id(&todo.id) || deleted.contains(&todo.id) {
+            continue;
+        }
+        ledger.local_upsert(TODO, &todo.id, todo_body(todo), None, todo.done_at.unwrap_or(todo.created_at));
+    }
     todos.iter().filter(|todo| deleted.contains(&todo.id)).map(|todo| todo.id.clone()).collect()
 }
 
@@ -919,6 +920,23 @@ mod tests {
     }
 
     #[test]
+    fn a_line_ticked_while_sync_was_off_reaches_the_phone() {
+        let mut ledger = Ledger::new("mac".into());
+        catch_up_todos(&mut ledger, &[todo("a", 5)], 1_000);
+        let sent: Vec<String> = ledger.take_outbox().iter().map(Record::key).collect();
+        ledger.acknowledge(&sent);
+        let ticked = Todo { done: true, done_at: Some(900), ..todo("a", 5) };
+        catch_up_todos(&mut ledger, &[ticked], 2_000);
+        let queued = ledger.take_outbox();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].body["done"], true);
+        // Unchanged since: nothing to send.
+        ledger.acknowledge(&[queued[0].key()]);
+        catch_up_todos(&mut ledger, &[Todo { done: true, done_at: Some(900), ..todo("a", 5) }], 3_000);
+        assert!(ledger.take_outbox().is_empty());
+    }
+
+    #[test]
     fn a_line_deleted_on_the_phone_but_still_here_is_handed_back() {
         let mut ledger = Ledger::new("mac".into());
         catch_up_todos(&mut ledger, &[todo("a", 5)], 1_000);
@@ -941,8 +959,8 @@ mod tests {
         let mut status = SyncStatus { supported: true, enabled: true, state: "noAccount".into(), message: None };
         assert!(status_label(&status).contains("iCloud"));
         status.state = "error".into();
-        status.message = Some("boom".into());
-        assert!(status_label(&status).ends_with("boom"));
+        status.message = Some("The Internet connection appears to be offline.".into());
+        assert!(!status_label(&status).contains("Internet"), "CloudKit's own words stay in the log");
         status.supported = false;
         assert!(!status_label(&status).is_empty());
     }

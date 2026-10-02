@@ -3,36 +3,37 @@ import UIKit
 
 struct ClipboardView: View {
     @EnvironmentObject private var model: SyncModel
-    @State private var toast: String?
-    @State private var toastCounter = 0
+    @State private var toast: Toast?
 
     var body: some View {
         Group {
             if model.clips.isEmpty {
                 // Scrollable, so pull-to-refresh works before there is anything to show.
                 ScrollView {
-                    EmptyStateView(
+                    SyncEmptyState(
                         symbol: "doc.on.clipboard",
                         title: t("剪贴板是空的", "Clipboard is empty"),
-                        message: t(
-                            "在 Mac 上复制的文字和图片会同步到这里，点一下就能拷贝到手机。Mac 上的 Bangs 需要打开 iCloud 同步。",
-                            "Text and pictures you copy on your Mac show up here; tap one to copy it to this phone. Bangs on your Mac needs iCloud sync turned on."
+                        connectedButEmpty: t(
+                            "Mac 上还没有剪贴板历史。在 Mac 上复制的文字和图片会出现在这里，点一下就复制到这台 iPhone。",
+                            "No clipboard history on your Mac yet. Text and pictures you copy there show up here; tap one to copy it to this iPhone."
                         )
                     )
-                        .padding(.top, 96)
+                    .padding(.top, 96)
                 }
                 .refreshable {
                     await model.syncNow()
                 }
             } else {
-                List {
-                    ForEach(model.clips) { clip in
-                        Button {
-                            copy(clip)
-                        } label: {
-                            ClipRow(clip: clip, picture: picture(of: clip))
+                // Redrawn every minute, so "3 minutes ago" stays true.
+                TimelineView(.everyMinute) { context in
+                    List {
+                        ForEach(model.clips) { clip in
+                            Button {
+                                copy(clip)
+                            } label: {
+                                ClipRow(clip: clip, picture: picture(of: clip), now: context.date)
+                            }
                         }
-                        .buttonStyle(.plain)
                     }
                 }
                 .listStyle(.insetGrouped)
@@ -42,13 +43,7 @@ struct ClipboardView: View {
             }
         }
         .navigationTitle(t("剪贴板", "Clipboard"))
-        .overlay(alignment: .bottom) {
-            if let toast = toast {
-                ToastView(text: toast)
-                    .padding(.bottom, 24)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-            }
-        }
+        .toast($toast)
         .settingsButton()
     }
 
@@ -62,41 +57,35 @@ struct ClipboardView: View {
     private func copy(_ clip: ClipItem) {
         if clip.isImage {
             guard let url = picture(of: clip), let image = UIImage(contentsOfFile: url.path) else {
-                show(clip.hasImage ? t("图片还在下载…", "Still downloading the picture…") : t("这张图片太大，没有同步过来", "This picture was too big to sync"))
+                show(
+                    clip.hasImage
+                        ? t("图片还在下载，稍等一下", "The picture is still downloading")
+                        : t("这张图片太大，没有同步过来", "This picture was too big to sync"),
+                    success: false
+                )
                 return
             }
             UIPasteboard.general.image = image
             UINotificationFeedbackGenerator().notificationOccurred(.success)
-            show(t("已拷贝图片", "Picture copied"))
+            show(t("已复制图片", "Picture copied"), success: true)
         } else if clip.isFiles {
-            show(t("文件只能在 Mac 上粘贴", "Files can only be pasted on the Mac"))
+            show(t("文件只能在 Mac 上粘贴", "Files can only be pasted on the Mac"), success: false)
         } else {
             UIPasteboard.general.string = clip.copyText
             UINotificationFeedbackGenerator().notificationOccurred(.success)
-            show(t("已拷贝", "Copied"))
+            show(t("已复制", "Copied"), success: true)
         }
     }
 
-    private func show(_ text: String) {
-        toastCounter += 1
-        let mine = toastCounter
-        withAnimation {
-            toast = text
-        }
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 1_400_000_000)
-            if toastCounter == mine {
-                withAnimation {
-                    toast = nil
-                }
-            }
-        }
+    private func show(_ text: String, success: Bool) {
+        toast = Toast(text: text, success: success)
     }
 }
 
 private struct ClipRow: View {
     let clip: ClipItem
     let picture: URL?
+    let now: Date
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -112,6 +101,7 @@ private struct ClipRow: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(clip.preview.isEmpty ? t("（空）", "(empty)") : clip.preview)
                     .font(.body)
+                    .foregroundStyle(.primary)
                     .lineLimit(3)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 Text(footer)
@@ -124,10 +114,13 @@ private struct ClipRow: View {
                 Image(systemName: "pin.fill")
                     .font(.caption)
                     .foregroundColor(.orange)
+                    .accessibilityLabel(t("已置顶", "Pinned"))
             }
         }
         .padding(.vertical, 2)
         .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+        .accessibilityHint(clip.isFiles ? "" : t("复制到这台 iPhone", "Copies it to this iPhone"))
     }
 
     private var symbol: String {
@@ -141,9 +134,9 @@ private struct ClipRow: View {
         if !clip.app.isEmpty {
             parts.append(clip.app)
         }
-        parts.append(Format.relative(clip.createdAt))
+        parts.append(Format.relative(clip.createdAt, now: now))
         if clip.isImage && picture == nil {
-            parts.append(clip.hasImage ? t("下载中", "downloading") : t("太大，未同步", "too big to sync"))
+            parts.append(clip.hasImage ? t("下载中…", "downloading…") : t("太大，未同步", "too big to sync"))
         }
         return parts.joined(separator: " · ")
     }

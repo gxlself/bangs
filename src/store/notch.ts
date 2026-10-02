@@ -5,7 +5,7 @@ import { native, type Bootstrap, type ScreenInfo, type Settings } from "../lib/n
 import { hasFreshActivity, useActivities } from "./activities";
 import { waitingSessions, useDev } from "./dev";
 import { isMediaLive, useMedia } from "./media";
-import { useTodos } from "./todos";
+import { TODO_REMINDER_MS, useTodos } from "./todos";
 
 export type Section = "music" | "shelf" | "dev" | "paste" | "board" | "todo";
 
@@ -100,6 +100,11 @@ export const useNotch = create<NotchStore>((set, get) => {
     if (hasFreshActivity(useActivities.getState().items, Date.now())) return "board";
     const { media, lastActiveAt } = useMedia.getState();
     if (media?.playing) return "music";
+    // The line the collapsed strip is showing as a reminder (see Notch.tsx) is
+    // what a hover over it should open.
+    const { items, dusting } = useTodos.getState();
+    const newest = items.find((item) => !item.done && !dusting.includes(item.id));
+    if (newest && Date.now() - newest.createdAt < TODO_REMINDER_MS) return "todo";
     const now = typeof performance !== "undefined" ? performance.now() : Date.now();
     if (isMediaLive(media, lastActiveAt, now)) return "music";
     return get().section;

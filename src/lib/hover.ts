@@ -22,6 +22,9 @@ export function refreshHover() {
   hoverAt(last);
 }
 
+// A list scrolled under a resting pointer puts other rows beneath it.
+document.addEventListener("scroll", () => refreshHover(), { capture: true, passive: true });
+
 export function hoverAt(point: [number, number] | null) {
   last = point;
   const next: Element[] = [];

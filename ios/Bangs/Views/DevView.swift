@@ -8,15 +8,15 @@ struct DevView: View {
             if model.sessions.isEmpty {
                 // Scrollable, so pull-to-refresh works before there is anything to show.
                 ScrollView {
-                    EmptyStateView(
+                    SyncEmptyState(
                         symbol: "terminal",
                         title: t("还没有会话", "No sessions yet"),
-                        message: t(
-                            "Mac 上的 Bangs 需要打开 iCloud 同步，Claude Code / Codex 的会话才会出现在这里。",
-                            "Bangs on your Mac needs iCloud sync turned on before Claude Code and Codex sessions show up here."
+                        connectedButEmpty: t(
+                            "Mac 上没有在跑的 Claude Code / Codex 会话。开一个，它就会出现在这里。",
+                            "No Claude Code or Codex session is running on your Mac. Start one and it shows up here."
                         )
                     )
-                        .padding(.top, 96)
+                    .padding(.top, 96)
                 }
                 .refreshable {
                     await model.syncNow()
@@ -30,7 +30,7 @@ struct DevView: View {
                             let online = model.isOnline(group.deviceID, at: context.date)
                             Section(header: GroupHeader(host: group.host, online: online)) {
                                 ForEach(group.items) { session in
-                                    SessionRow(session: session)
+                                    SessionRow(session: session, online: online, now: context.date)
                                         .opacity(online ? 1 : 0.45)
                                 }
                             }
@@ -43,12 +43,22 @@ struct DevView: View {
                 }
             }
         }
-        .navigationTitle(t("开发", "Dev"))
+        .navigationTitle(t("代码", "Code"))
         .onAppear {
-            // The moment "notify me when it waits" makes sense to ask about.
-            model.requestNotificationPermission()
+            askForNotifications()
+        }
+        .onChange(of: model.sessions.isEmpty) { _ in
+            askForNotifications()
         }
         .settingsButton()
+    }
+
+    /// "Notify me when it waits" is worth asking about once there is a session to wait on —
+    /// not on an empty page, where the question makes no sense yet.
+    private func askForNotifications() {
+        if !model.sessions.isEmpty && model.selectedTab == .dev {
+            model.requestNotificationPermission()
+        }
     }
 }
 
@@ -64,14 +74,18 @@ private struct GroupHeader: View {
             if !online {
                 Text(t("· 离线，状态可能已过期", "· offline, may be out of date"))
                     .foregroundStyle(.secondary)
-                    .textCase(nil)
             }
         }
+        // A computer's name is written the way its owner wrote it.
+        .textCase(nil)
+        .lineLimit(1)
     }
 }
 
 private struct SessionRow: View {
     let session: SessionItem
+    let online: Bool
+    let now: Date
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -79,6 +93,7 @@ private struct SessionRow: View {
                 .font(.title3)
                 .frame(width: 30, height: 30)
                 .foregroundColor(.accentColor)
+                .accessibilityHidden(true)
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(session.project)
@@ -91,7 +106,7 @@ private struct SessionRow: View {
                 if session.status == .waiting, let detail = session.detail {
                     Text(detail)
                         .font(.subheadline)
-                        .foregroundColor(.orange)
+                        .foregroundStyle(.primary)
                         .lineLimit(3)
                 }
             }
@@ -100,6 +115,16 @@ private struct SessionRow: View {
             StatusBadge(status: session.status)
         }
         .padding(.vertical, 2)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(accessibilityText)
+    }
+
+    private var agentName: String {
+        switch session.agent {
+        case "claude": return "Claude Code"
+        case "codex": return "Codex"
+        default: return t("会话", "Session")
+        }
     }
 
     private var agentSymbol: String {
@@ -111,41 +136,76 @@ private struct SessionRow: View {
     }
 
     private var subtitle: String {
-        let when = Format.relative(session.statusAt)
+        let when = Format.relative(session.statusAt, now: now)
         if session.name.isEmpty || session.name == session.project {
             return when
         }
         return session.name + " · " + when
     }
+
+    /// "Claude Code, my-app, waiting for you: Allow edit?, 3 minutes ago".
+    private var accessibilityText: String {
+        var parts = [agentName, session.project, session.status.label]
+        if session.status == .waiting, let detail = session.detail {
+            parts.append(detail)
+        }
+        parts.append(Format.relative(session.statusAt, now: now))
+        if !online {
+            parts.append(t("Mac 离线，状态可能已过期", "Mac offline, may be out of date"))
+        }
+        return parts.joined(separator: ", ")
+    }
 }
 
-/// "Waiting" is the loud one: a solid orange pill. Busy and idle stay quiet.
+private extension SessionStatus {
+    var label: String {
+        switch self {
+        case .waiting: return t("等你回复", "Waiting for you")
+        case .busy: return t("运行中", "Running")
+        case .idle: return t("空闲", "Idle")
+        }
+    }
+
+    /// The pill: short enough for the end of a row.
+    var badge: String {
+        switch self {
+        case .waiting: return t("等你回复", "Waiting")
+        case .busy: return t("运行中", "Running")
+        case .idle: return t("空闲", "Idle")
+        }
+    }
+}
+
+/// "Waiting" is the loud one: a solid orange pill. Running and idle stay quiet.
 private struct StatusBadge: View {
     let status: SessionStatus
 
     var body: some View {
         switch status {
         case .waiting:
-            Text(t("等你", "Waiting"))
+            Text(status.badge)
                 .font(.caption.weight(.bold))
                 .foregroundColor(.white)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 4)
                 .background(Color.orange, in: Capsule())
+                .fixedSize()
         case .busy:
-            Text(t("运行中", "Busy"))
+            Text(status.badge)
                 .font(.caption.weight(.semibold))
                 .foregroundColor(.blue)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 4)
                 .background(Color.blue.opacity(0.15), in: Capsule())
+                .fixedSize()
         case .idle:
-            Text(t("空闲", "Idle"))
+            Text(status.badge)
                 .font(.caption.weight(.medium))
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 4)
                 .background(Color(UIColor.tertiarySystemFill), in: Capsule())
+                .fixedSize()
         }
     }
 }

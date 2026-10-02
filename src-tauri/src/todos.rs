@@ -17,8 +17,10 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::sync::{self, Record};
 
-/// The panel is a glance, not a backlog: the oldest lines drop off the end.
-const MAX_TODOS: usize = 60;
+/// The panel is a glance, not a backlog: past this many lines the ones finished
+/// longest ago drop off the end, and with this many still open the list takes
+/// no more until some are done.
+pub const MAX_TODOS: usize = 60;
 /// One line of text. Anything longer belongs in a real task list.
 const MAX_TEXT: usize = 200;
 
@@ -113,8 +115,11 @@ fn edit(app: &AppHandle, origin: Origin, change: impl FnOnce(&mut Vec<Todo>)) {
         let before = guard.clone();
         change(&mut guard);
         sort(&mut guard);
+        // Only done lines fall off: an open one is something still to do, and
+        // the phone may have added more than the notch would have.
+        let keep = MAX_TODOS.max(guard.iter().filter(|todo| !todo.done).count());
         let dropped: Vec<String> =
-            if guard.len() > MAX_TODOS { guard.split_off(MAX_TODOS).into_iter().map(|todo| todo.id).collect() } else { Vec::new() };
+            if guard.len() > keep { guard.split_off(keep).into_iter().map(|todo| todo.id).collect() } else { Vec::new() };
         let changed: Vec<Todo> = match origin {
             Origin::Here => guard
                 .iter()
@@ -179,6 +184,10 @@ pub fn todo_add(app: AppHandle, text: String) {
     }
     let created_at = now_ms();
     edit(&app, Origin::Here, |todos| {
+        // Full of open lines: the panel says so instead of taking another.
+        if todos.iter().filter(|todo| !todo.done).count() >= MAX_TODOS {
+            return;
+        }
         todos.insert(0, Todo::new(next_id(created_at), text, created_at));
     });
 }
@@ -314,7 +323,7 @@ mod tests {
     }
 
     #[test]
-    fn a_line_ticked_off_on_the_phone_goes() {
+    fn a_line_deleted_on_the_phone_goes() {
         let mut todos = vec![todo("a", "x", 10), todo("b", "y", 20)];
         merge_remote(&mut todos, &[record("a", true, json!({}))]);
         assert_eq!(todos, vec![todo("b", "y", 20)]);

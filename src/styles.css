@@ -69,6 +69,7 @@ img {
 .link-button,
 .row,
 .tile__action,
+.todo__delete,
 .progress {
   cursor: pointer;
 }
@@ -1385,21 +1386,28 @@ button:disabled,
   text-decoration-color: var(--faint);
 }
 
-/* Deleting is its own small button, there only while the line is hovered. */
+/* Deleting is its own small button, there only while the line is hovered —
+   and only clickable then: an invisible × must never take a click meant as a
+   tick. 22px to aim at, drawn as 18. */
 .todo__delete {
   display: grid;
   flex: none;
   place-items: center;
-  width: 18px;
-  height: 18px;
-  border-radius: 9px;
-  color: var(--faint);
+  width: 22px;
+  height: 22px;
+  margin-right: -4px;
+  border-radius: 11px;
+  background-clip: content-box;
+  padding: 2px;
+  color: var(--muted);
   opacity: 0;
+  pointer-events: none;
   transition: opacity 0.15s, background 0.15s, color 0.15s;
 }
 
 .todo__row[data-hover] .todo__delete {
   opacity: 1;
+  pointer-events: auto;
 }
 
 .todo__delete[data-hover] {
@@ -1408,10 +1416,52 @@ button:disabled,
 }
 
 /* Deleted: the line comes apart and blows off the list, and the row folds up
-   behind the dust. */
+   behind the dust. With "Clear done" the rows go one after another. A done
+   line keeps its strike-through as it breaks up. */
 .todo__row.is-dust {
   pointer-events: none;
-  animation: dust-row 0.26s var(--ease-out) 0.64s forwards;
+  animation: dust-row 0.26s var(--ease-out) calc(0.64s + var(--row-delay, 0ms)) forwards;
+}
+
+.todo__row.is-done .todo__dust {
+  color: var(--faint);
+  text-decoration: line-through;
+  text-decoration-color: var(--faint);
+}
+
+.todo .shelf__footer {
+  min-height: 19px;
+}
+
+.link-button.is-confirming {
+  color: var(--attention);
+}
+
+.todo__input:disabled {
+  cursor: default;
+}
+
+/* More rows below the fold: the last one fades out instead of being cut. */
+.rows.is-more {
+  -webkit-mask-image: linear-gradient(180deg, #000 calc(100% - 14px), transparent);
+  mask-image: linear-gradient(180deg, #000 calc(100% - 14px), transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .todo__dust,
+  .todo__box svg {
+    animation: none;
+  }
+
+  .todo__row.is-dust {
+    animation: dust-fade 0.2s ease-out forwards;
+  }
+}
+
+@keyframes dust-fade {
+  to {
+    opacity: 0;
+  }
 }
 
 .todo__row.is-dust .todo__delete {

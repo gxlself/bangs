@@ -136,10 +136,6 @@ impl Ledger {
         fs::rename(temp, path)
     }
 
-    pub fn has_version(&self, kind: &str, id: &str) -> bool {
-        self.versions.contains_key(&key_of(kind, id))
-    }
-
     /// Changes that still have to reach the cloud.
     #[cfg(test)]
     pub fn pending(&self) -> usize {

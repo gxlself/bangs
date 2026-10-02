@@ -55,6 +55,13 @@ targets:
       path: Bangs/Info.plist
       properties:
         CFBundleDisplayName: Bangs
+        # The app speaks Chinese and English (t() in I18n.swift); saying so here makes the
+        # system's own words follow — Cancel, Done, edit menus, CloudKit's messages — and
+        # gives the app its own Language setting.
+        CFBundleDevelopmentRegion: en
+        CFBundleLocalizations:
+          - en
+          - zh-Hans
         # XcodeGen writes 1.0 / 1 here unless told otherwise; follow the build settings above.
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)

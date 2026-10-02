@@ -1,6 +1,6 @@
 # Bangs for iOS
 
-Bangs 的 iPhone / iPad 端：用 CloudKit 和 Mac 上的 Bangs 同步，看 Mac 的开发会话、剪贴板、文件架，并且可以直接加待办、勾待办。
+Bangs 的 iPhone / iPad 端：用 CloudKit 和 Mac 上的 Bangs 同步，看 Mac 的开发会话、剪贴板、暂存架，并且可以直接加待办、勾待办。
 同步的格式和规则在 [`docs/sync.md`](../docs/sync.md)，这里不重复。
 
 不用 Core Data：一种记录类型（`BangsRecord`），引擎在 [`packages/BangsCloud`](../packages/BangsCloud)，和 Mac 端共用同一套合并规则。
@@ -65,15 +65,16 @@ CloudKit 那一层（`CloudEngine`）没有自动化测试，要真机联调。
 
 | 想改什么 | 改哪个文件 |
 | --- | --- |
-| 待办的加 / 勾选 / 删除 / 清洗规则（长度、换行） | `ios/Bangs/SyncModel.swift`（`addTodo`、`toggleTodo`、`deleteTodo`、`clearCompletedTodos`、`cleanTodo`） |
+| 待办的加 / 勾选 / 删除 / 清洗规则（长度、换行） | `ios/Bangs/SyncModel.swift`（`addTodo`、`toggleTodo`、`deleteTodo`、`deleteTodos`、`cleanTodo`） |
 | 同步流程（什么时候拉、什么时候推、失败重试） | `ios/Bangs/SyncModel.swift`（`handle`、`syncNow`、`scheduleRetry`） |
 | 某个 kind 的字段（body 里多一个字段） | `ios/Bangs/Models.swift`，同时更新 `docs/sync.md` |
 | 待办页 | `ios/Bangs/Views/TodoView.swift` |
-| 开发会话页（分组、排序、状态标签） | `ios/Bangs/Views/DevView.swift`，排序在 `Models.swift` 的 `SessionItem.isOrderedBefore` |
+| 空状态（还在载入、没登录 iCloud、Mac 没打开同步） | `ios/Bangs/Views/Components.swift` 的 `SyncEmptyState`，判断在 `SyncModel.emptyReason` |
+| 代码页：开发会话（分组、排序、状态标签） | `ios/Bangs/Views/DevView.swift`，排序在 `Models.swift` 的 `SessionItem.isOrderedBefore` |
 | 「Claude 在等你」通知（何时发、文案、点了去哪） | `ios/Bangs/SyncModel.swift`（`announceWaiting`、`requestNotificationPermission`），前台展示和点击在 `AppDelegate.swift` |
-| 剪贴板页（点一下拷贝、提示） | `ios/Bangs/Views/ClipboardView.swift` |
-| 文件架页（预览、「太大未同步」） | `ios/Bangs/Views/ShelfView.swift`、`QuickLookPreview.swift`，文件路径在 `AssetFiles.swift` |
-| 设置页（iCloud 状态文案） | `ios/Bangs/Views/SettingsView.swift` |
+| 剪贴板页（点一下复制、提示） | `ios/Bangs/Views/ClipboardView.swift`，提示条在 `Components.swift` 的 `Toast` |
+| 暂存架页（预览、「太大未同步」） | `ios/Bangs/Views/ShelfView.swift`、`QuickLookPreview.swift`，文件路径在 `AssetFiles.swift` |
+| 设置页（iCloud 状态文案、Mac 在线状态） | `ios/Bangs/Views/SettingsView.swift` |
 | 中英文文案 | 就近改调用处的 `t("中文", "English")`（和桌面端一样，没有 .strings 文件） |
 | 静默推送、后台唤醒 | `ios/Bangs/AppDelegate.swift`，Info.plist 的 `UIBackgroundModes` 在 `ios/project.yml` |
 | iCloud 容器、推送权限 | `ios/Bangs/Bangs.entitlements` |

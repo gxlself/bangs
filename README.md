@@ -33,8 +33,8 @@ wants "Run anyway" once.
 - **iPhone & iPad app** (`ios/`): to-dos, the dev panel's Claude Code / Codex status, the clipboard and the
   shelf on your phone, synced through your own iCloud (CloudKit, like Paste) — no server. To-dos go both
   ways; the rest is the Mac's mirror, read-only on the phone. Off until you turn it on in the tray menu
-  ("Sync with iPhone"), and clipboard text is end-to-end encrypted in CloudKit. macOS only; Windows keeps
-  its data local. See [docs/sync.md](docs/sync.md).
+  ("Sync with iPhone (iCloud)"); to-dos, session details, clipboard text and pictures are end-to-end
+  encrypted in CloudKit (shelf files are ordinary CloudKit assets). macOS only; Windows keeps its data local. See [docs/sync.md](docs/sync.md).
 
 Screens with a hardware notch get wings around it; other screens get a virtual notch, which shrinks
 to a thin bar when nothing is happening (the tray menu can turn that off). Full-screen video, games
