@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent } f
 
 import { t } from "../lib/i18n";
 import { useTodos } from "../store/todos";
-import { CheckIcon, PlusIcon } from "./Icons";
+import { CheckIcon, CloseIcon, PlusIcon } from "./Icons";
 
 /** How far apart the characters of a line start coming loose. */
 const STAGGER_MS = 220;
@@ -10,14 +10,18 @@ const STAGGER_MS = 220;
 /**
  * The one panel you type into. The notch never takes focus on its own, so the
  * field asks for the keyboard when it is focused and hands it straight back
- * (see `capture_keyboard` and src/store/todos.ts). A line that is done with is
- * not kept around: it comes apart and blows off the list.
+ * (see `capture_keyboard` and src/store/todos.ts).
+ *
+ * Clicking a line ticks it off — it is struck through and sinks below what is
+ * still open — and clicking it again brings it back. Deleting is its own act:
+ * the × on a line, or "Clear done" for every done line at once, and a deleted
+ * line comes apart and blows off the list.
  */
 export function TodoPanel() {
   const items = useTodos((state) => state.items);
   const dusting = useTodos((state) => state.dusting);
   const typing = useTodos((state) => state.typing);
-  const { add, snap, setTyping } = useTodos.getState();
+  const { add, toggle, remove, clearDone, setTyping } = useTodos.getState();
   const [draft, setDraft] = useState("");
   const field = useRef<HTMLInputElement>(null);
 
@@ -42,7 +46,9 @@ export function TodoPanel() {
     }
   };
 
-  const left = items.filter((item) => !dusting.includes(item.id)).length;
+  const alive = items.filter((item) => !dusting.includes(item.id));
+  const left = alive.filter((item) => !item.done).length;
+  const done = alive.length - left;
 
   return (
     <div className="todo">
@@ -69,18 +75,28 @@ export function TodoPanel() {
             return (
               <div
                 key={item.id}
-                className={`row todo__row${dust ? " is-dust" : ""}`}
+                className={`row todo__row${item.done ? " is-done" : ""}${dust ? " is-dust" : ""}`}
                 title={item.text}
-                onClick={() => snap(item.id)}
+                onClick={() => toggle(item.id)}
               >
-                <span className="todo__box">{dust && <CheckIcon width={11} height={11} />}</span>
+                <span className="todo__box">{item.done && <CheckIcon width={11} height={11} />}</span>
                 <span className="row__main">
                   {dust ? (
                     <Dust text={item.text} />
                   ) : (
-                    <span className="row__title row__title--plain">{item.text}</span>
+                    <span className="row__title row__title--plain todo__text">{item.text}</span>
                   )}
                 </span>
+                <button
+                  className="todo__delete"
+                  title={t("删除", "Delete")}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    remove(item.id);
+                  }}
+                >
+                  <CloseIcon width={9} height={9} />
+                </button>
               </div>
             );
           })}
@@ -92,9 +108,16 @@ export function TodoPanel() {
       <div className="shelf__footer">
         <span>
           {left
-            ? t(`还有 ${left} 件 · 点一下就散了`, `${left} to go · click one and it's dust`)
-            : t("都做完了", "All done")}
+            ? t(`还有 ${left} 件 · 点一下打勾`, `${left} to go · click to tick off`)
+            : alive.length
+              ? t("都做完了", "All done")
+              : ""}
         </span>
+        {done > 0 && (
+          <button className="link-button" onClick={clearDone}>
+            {t(`清除已完成（${done}）`, `Clear ${done} done`)}
+          </button>
+        )}
       </div>
     </div>
   );

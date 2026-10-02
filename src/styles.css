@@ -1357,16 +1357,65 @@ button:disabled,
   border-color: var(--muted);
 }
 
-/* Ticked off: the line fills in, comes apart and blows off the list. Nothing
-   is kept, so the row folds up behind the dust. */
+/* Ticked off: the box fills in and the line is struck through and dimmed;
+   the list sorts it below what is still open. */
+.todo__row.is-done .todo__box {
+  border-color: var(--focus);
+  background: var(--focus);
+}
+
+.todo__box svg {
+  animation: tick 0.18s var(--ease-out);
+}
+
+@keyframes tick {
+  from {
+    opacity: 0;
+    transform: scale(0.4);
+  }
+}
+
+.todo__text {
+  transition: color 0.2s;
+}
+
+.todo__row.is-done .todo__text {
+  color: var(--faint);
+  text-decoration: line-through;
+  text-decoration-color: var(--faint);
+}
+
+/* Deleting is its own small button, there only while the line is hovered. */
+.todo__delete {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 9px;
+  color: var(--faint);
+  opacity: 0;
+  transition: opacity 0.15s, background 0.15s, color 0.15s;
+}
+
+.todo__row[data-hover] .todo__delete {
+  opacity: 1;
+}
+
+.todo__delete[data-hover] {
+  background: var(--fill-strong);
+  color: var(--text);
+}
+
+/* Deleted: the line comes apart and blows off the list, and the row folds up
+   behind the dust. */
 .todo__row.is-dust {
   pointer-events: none;
   animation: dust-row 0.26s var(--ease-out) 0.64s forwards;
 }
 
-.todo__row.is-dust .todo__box {
-  border-color: var(--focus);
-  background: var(--focus);
+.todo__row.is-dust .todo__delete {
+  visibility: hidden;
 }
 
 .todo__dust {

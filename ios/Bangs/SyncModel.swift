@@ -198,23 +198,42 @@ final class SyncModel: ObservableObject {
         let text = SyncModel.cleanTodo(raw)
         if text.isEmpty { return false }
         let now = nowMillis()
-        let body = JSONValue.object([
-            "text": JSONValue.string(text),
-            "createdAt": JSONValue.int(now),
-        ])
-        let id = UUID().uuidString.lowercased()
-        let record = store.localUpsert(kind: "todo", id: id, body: body, asset: nil, now: now, device: deviceID)
+        let item = TodoItem(id: UUID().uuidString.lowercased(), text: text, createdAt: now)
+        let record = store.localUpsert(kind: "todo", id: item.id, body: item.body, asset: nil, now: now, device: deviceID)
         if record == nil { return false }
-        saveStore()
-        publish()
-        pushSoon()
+        changed()
         return true
     }
 
-    /// Ticking a line deletes it, as on the Mac: a tombstone goes out.
-    func completeTodo(id: String) {
-        let record = store.localDelete(kind: "todo", id: id, now: nowMillis(), device: deviceID)
-        if record == nil { return }
+    /// Ticks a line off, or brings a done one back — as on the Mac, ticking does not delete.
+    func toggleTodo(id: String) {
+        guard let item = todos.first(where: { $0.id == id }) else { return }
+        let now = nowMillis()
+        let next = TodoItem(id: item.id, text: item.text, createdAt: item.createdAt, done: !item.done, doneAt: now)
+        guard store.localUpsert(kind: "todo", id: id, body: next.body, asset: nil, now: now, device: deviceID) != nil else { return }
+        changed()
+    }
+
+    /// Deletes a line, here and on the Mac: a tombstone goes out.
+    func deleteTodo(id: String) {
+        guard store.localDelete(kind: "todo", id: id, now: nowMillis(), device: deviceID) != nil else { return }
+        changed()
+    }
+
+    /// Deletes every done line.
+    func clearCompletedTodos() {
+        let now = nowMillis()
+        var any = false
+        for item in todos where item.done {
+            if store.localDelete(kind: "todo", id: item.id, now: now, device: deviceID) != nil {
+                any = true
+            }
+        }
+        if any { changed() }
+    }
+
+    /// After a local edit: on disk, on screen, on its way.
+    private func changed() {
         saveStore()
         publish()
         pushSoon()
@@ -367,11 +386,7 @@ final class SyncModel: ObservableObject {
     private func publish() {
         todos = store.live(kind: "todo")
             .compactMap { TodoItem(record: $0) }
-            .sorted { lhs, rhs in
-                // Newest first, as on the Mac.
-                if lhs.createdAt != rhs.createdAt { return lhs.createdAt > rhs.createdAt }
-                return lhs.id < rhs.id
-            }
+            .sorted(by: TodoItem.isOrderedBefore)
         sessions = store.live(kind: "session")
             .compactMap { SessionItem(record: $0) }
             .sorted(by: SessionItem.isOrderedBefore)

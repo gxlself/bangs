@@ -30,7 +30,8 @@ export function Notch() {
   const waiting = useDev((s) => waitingSessions(s.sessions).length);
   const lyricLines = useLyrics((s) => s.lines);
   const docked = useActivities((s) => s.items[0] ?? null);
-  const newestTodo = useTodos((s) => s.items.find((item) => !s.dusting.includes(item.id)) ?? null);
+  // The newest line still to do; a done line is nothing to be reminded of.
+  const newestTodo = useTodos((s) => s.items.find((item) => !item.done && !s.dusting.includes(item.id)) ?? null);
   const lyricsTimed = useLyrics((s) => s.timed);
 
   // The lyric sweep needs a fast clock; everything else here is slow.

@@ -20,9 +20,10 @@ wants "Run anyway" once.
   offers to install it when it is missing; on Windows, where there is no Paste, Bangs records the
   history itself. Click an entry to put it back on the clipboard.
 - **To-do**: a short list you type into — the one place the notch takes the keyboard, and only while
-  the field is focused. Click a line when it is done and it comes apart and blows off the list;
-  nothing is kept. A new line waits beside the collapsed notch for a few minutes unless something
-  is playing.
+  the field is focused. Click a line to tick it off: it is struck through and sinks below what is still
+  open, and clicking it again brings it back. Deleting is its own act — the × on a line, or "Clear done"
+  for every done line at once — and a deleted line comes apart and blows off the list. A new line waits
+  beside the collapsed notch for a few minutes unless something is playing.
 - **Tabs**: drag a tab along the bar to put the panels in the order you use them; the order is
   kept across restarts. A tab that only shows up sometimes, like the board, keeps its place.
 - **Board**: anything else on the machine can dock a row — a title, a subtitle, a progress bar and

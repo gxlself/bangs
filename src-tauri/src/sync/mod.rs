@@ -248,7 +248,7 @@ fn enable(app: &AppHandle, from_scratch: bool) {
 /// phone) that are still on the list, for the caller to take off.
 fn catch_up_todos(ledger: &mut Ledger, todos: &[Todo], now: u64) -> Vec<String> {
     let here: std::collections::HashSet<&str> = todos.iter().map(|todo| todo.id.as_str()).collect();
-    // Ticked off while nobody was listening: the phone still has to hear it.
+    // Deleted while nobody was listening: the phone still has to hear it.
     for id in ledger.live_ids(TODO) {
         if !here.contains(id.as_str()) {
             ledger.local_delete(TODO, &id, now);
@@ -539,7 +539,7 @@ pub(crate) fn on_event(app: &AppHandle, raw: &str) {
 // ---------------------------------------------------------------- to-dos
 
 fn todo_body(todo: &Todo) -> Value {
-    json!({ "text": todo.text, "createdAt": todo.created_at })
+    json!({ "text": todo.text, "createdAt": todo.created_at, "done": todo.done, "doneAt": todo.done_at })
 }
 
 /// A line was added here.
@@ -552,7 +552,7 @@ pub fn todo_upsert(app: &AppHandle, todo: &Todo) {
     change(app, |ledger| ledger.local_upsert(TODO, &todo.id, todo_body(todo), None, now_ms()).is_some());
 }
 
-/// A line was ticked off, or thought better of.
+/// A line was deleted here.
 pub fn todo_delete(app: &AppHandle, id: &str) {
     if !enabled(app) {
         return;
@@ -561,10 +561,13 @@ pub fn todo_delete(app: &AppHandle, id: &str) {
 }
 
 /// The to-do list as a `Todo` again, from a record that came from the phone.
+/// A record from before there was a done state reads as not done.
 pub fn todo_from_record(record: &Record) -> Option<Todo> {
     let text = record.body.get("text")?.as_str()?.to_string();
     let created_at = record.body.get("createdAt").and_then(Value::as_u64).unwrap_or(record.updated_at);
-    Some(Todo { id: record.id.clone(), text, created_at })
+    let done = record.body.get("done").and_then(Value::as_bool).unwrap_or(false);
+    let done_at = if done { Some(record.body.get("doneAt").and_then(Value::as_u64).unwrap_or(record.updated_at)) } else { None };
+    Some(Todo { id: record.id.clone(), text, created_at, done, done_at })
 }
 
 // -------------------------------------------------- what the Mac mirrors
@@ -774,6 +777,15 @@ mod tests {
         .unwrap();
         let todo = todo_from_record(&record).unwrap();
         assert_eq!((todo.id.as_str(), todo.text.as_str(), todo.created_at), ("ABC-1", "买牛奶", 5));
+        assert!(!todo.done && todo.done_at.is_none(), "no done field means not done");
+        let ticked: Record = serde_json::from_value(json!({
+            "kind": "todo", "id": "x", "updatedAt": 9, "device": "phone",
+            "body": { "text": "t", "createdAt": 5, "done": true, "doneAt": 8 }
+        }))
+        .unwrap();
+        let todo = todo_from_record(&ticked).unwrap();
+        assert_eq!((todo.done, todo.done_at), (true, Some(8)));
+        assert_eq!(todo_body(&todo)["done"], true);
         let broken: Record =
             serde_json::from_value(json!({ "kind": "todo", "id": "x", "updatedAt": 1, "device": "d", "body": {} })).unwrap();
         assert!(todo_from_record(&broken).is_none());
@@ -798,7 +810,7 @@ mod tests {
     }
 
     fn todo(id: &str, created_at: u64) -> Todo {
-        Todo { id: id.into(), text: format!("line {id}"), created_at }
+        Todo::new(id.into(), format!("line {id}"), created_at)
     }
 
     #[test]
@@ -813,12 +825,12 @@ mod tests {
     }
 
     #[test]
-    fn a_line_ticked_off_while_sync_was_off_is_deleted_everywhere() {
+    fn a_line_deleted_while_sync_was_off_is_deleted_everywhere() {
         let mut ledger = Ledger::new("mac".into());
         catch_up_todos(&mut ledger, &[todo("a", 5), todo("b", 7)], 1_000);
         let sent: Vec<String> = ledger.take_outbox().iter().map(Record::key).collect();
         ledger.acknowledge(&sent);
-        // Sync off; "a" ticked off; sync on again.
+        // Sync off; "a" deleted; sync on again.
         catch_up_todos(&mut ledger, &[todo("b", 7)], 2_000);
         let queued = ledger.take_outbox();
         assert_eq!(queued.len(), 1);

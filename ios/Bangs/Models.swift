@@ -10,17 +10,25 @@ import BangsSyncCore
 private struct TodoBody: Codable {
     var text: String?
     var createdAt: Int64?
+    var done: Bool?
+    var doneAt: Int64?
 }
 
 struct TodoItem: Identifiable, Equatable {
     let id: String
     let text: String
     let createdAt: Int64
+    /// Ticked off; ticking again brings it back. Deleting is separate.
+    let done: Bool
+    /// When it was ticked off.
+    let doneAt: Int64?
 
-    init(id: String, text: String, createdAt: Int64) {
+    init(id: String, text: String, createdAt: Int64, done: Bool = false, doneAt: Int64? = nil) {
         self.id = id
         self.text = text
         self.createdAt = createdAt
+        self.done = done
+        self.doneAt = done ? doneAt : nil
     }
 
     init?(record: SyncRecord) {
@@ -30,7 +38,39 @@ struct TodoItem: Identifiable, Equatable {
         else {
             return nil
         }
-        self.init(id: record.id, text: text, createdAt: body.createdAt ?? record.updatedAt)
+        // A record from before there was a done state reads as not done.
+        let done = body.done ?? false
+        self.init(
+            id: record.id,
+            text: text,
+            createdAt: body.createdAt ?? record.updatedAt,
+            done: done,
+            doneAt: done ? (body.doneAt ?? record.updatedAt) : nil
+        )
+    }
+
+    /// The record body, in the contract's field names (docs/sync.md).
+    var body: JSONValue {
+        var members: [String: JSONValue] = [
+            "text": .string(text),
+            "createdAt": .int(createdAt),
+            "done": .bool(done),
+        ]
+        members["doneAt"] = doneAt.map { JSONValue.int($0) } ?? .null
+        return .object(members)
+    }
+
+    /// Open lines newest first, then done lines most recently done first — the Mac's order.
+    static func isOrderedBefore(_ a: TodoItem, _ b: TodoItem) -> Bool {
+        if a.done != b.done { return !a.done }
+        if a.done {
+            let left = a.doneAt ?? a.createdAt
+            let right = b.doneAt ?? b.createdAt
+            if left != right { return left > right }
+        } else if a.createdAt != b.createdAt {
+            return a.createdAt > b.createdAt
+        }
+        return a.id < b.id
     }
 }
 

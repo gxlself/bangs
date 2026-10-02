@@ -165,6 +165,10 @@ export interface Todo {
   text: string;
   /** Unix milliseconds. */
   createdAt: number;
+  /** Ticked off; ticking again brings it back. */
+  done: boolean;
+  /** When it was ticked off, Unix milliseconds. */
+  doneAt?: number | null;
 }
 
 export interface Bootstrap {
@@ -208,7 +212,9 @@ export const native = {
   /** Opens the link on a plugin row; the native side looks the link up itself. */
   activityOpen: (id: string) => invoke<void>("activity_open", { id }),
   todoAdd: (text: string) => invoke<void>("todo_add", { text }),
+  todoToggle: (id: string) => invoke<void>("todo_toggle", { id }),
   todoRemove: (id: string) => invoke<void>("todo_remove", { id }),
+  todoClearDone: () => invoke<void>("todo_clear_done"),
   inspectFiles: (paths: string[]) => invoke<FileMeta[]>("shelf_inspect", { paths }),
   openFile: (path: string) => invoke<void>("open_file", { path }),
   revealFile: (path: string) => invoke<void>("reveal_file", { path }),

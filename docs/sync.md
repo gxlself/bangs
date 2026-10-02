@@ -7,7 +7,7 @@ Bangs 像 Paste 一样，用 **CloudKit 私有数据库**同步，走用户自�
 ```
 ┌────────────── macOS · Bangs（Tauri） ──────────────┐        ┌──────── iOS · Bangs（SwiftUI） ────────┐
 │ todos / clipboard / dev / shelf                    │        │ To-do · 开发 · 剪贴板 · 文件架          │
-│        │ 本地变更             ▲ 远端变更           │        │      ▲ 展示            │ 勾掉/新增待办  │
+│        │ 本地变更             ▲ 远端变更           │        │      ▲ 展示            │ 勾选/新增待办  │
 │   sync::Ledger（版本表 + 待推送队列，Rust）        │        │  RecordStore（版本表 + 队列，Swift）    │
 │        │ JSON                 │ JSON               │        │      │ 同一个 BangsCloud 引擎           │
 │   C ABI（BangsCloudBridge，Swift 静态库）          │        │      ▼                                  │
@@ -22,7 +22,7 @@ Windows 版没有 iCloud，同步保持关闭，行为和以前完全一样。
 
 | kind | 方向 | 记录 id | 说明 |
 | --- | --- | --- | --- |
-| `todo` | 双向 | Mac 生成的 id，或 iOS 生成的 UUID | 勾掉 = 删除（和 Bangs 现有行为一致），删除以墓碑记录传播 |
+| `todo` | 双向 | Mac 生成的 id，或 iOS 生成的 UUID | 勾选 = 完成（`done`，可以再勾回来），是对记录的修改；删除才写墓碑 |
 | `session` | Mac → iOS | `<device8>-<会话 id>` | Claude Code / Codex 会话的忙碌、等待、空闲；Mac 上消失的会话写墓碑 |
 | `clip` | Mac → iOS | `<device8>-<内容哈希>` | 最近 24 条剪贴板（面板的第一页）；文本带全文（≤ 8000 字符），图片/文件只有预览文字。读不到 Paste 的数据库时这一轮不动，免得 id 全变 |
 | `shelf` | Mac → iOS | `<device8>-<路径哈希>` | 文件架；≤ 25 MB（25,000,000 字节，十进制）的文件作为 CKAsset 上传，更大的只同步元数据。文件夹不同步 |
@@ -67,7 +67,9 @@ Windows 版没有 iCloud，同步保持关闭，行为和以前完全一样。
 
 ```jsonc
 // todo
-{ "text": "买牛奶", "createdAt": 1760000000000 }
+{ "text": "买牛奶", "createdAt": 1760000000000,
+  "done": false,                // 勾选了没有；没有这个字段（旧版本写的）当作 false
+  "doneAt": null }              // 勾选的时间；没勾选是 null
 
 // session
 { "agent": "claude",            // "claude" | "codex"

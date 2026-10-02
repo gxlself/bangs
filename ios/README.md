@@ -65,7 +65,7 @@ CloudKit 那一层（`CloudEngine`）没有自动化测试，要真机联调。
 
 | 想改什么 | 改哪个文件 |
 | --- | --- |
-| 待办的加 / 勾 / 清洗规则（长度、换行） | `ios/Bangs/SyncModel.swift`（`addTodo`、`completeTodo`、`cleanTodo`） |
+| 待办的加 / 勾选 / 删除 / 清洗规则（长度、换行） | `ios/Bangs/SyncModel.swift`（`addTodo`、`toggleTodo`、`deleteTodo`、`clearCompletedTodos`、`cleanTodo`） |
 | 同步流程（什么时候拉、什么时候推、失败重试） | `ios/Bangs/SyncModel.swift`（`handle`、`syncNow`、`scheduleRetry`） |
 | 某个 kind 的字段（body 里多一个字段） | `ios/Bangs/Models.swift`，同时更新 `docs/sync.md` |
 | 待办页 | `ios/Bangs/Views/TodoView.swift` |

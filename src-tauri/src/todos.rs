@@ -2,8 +2,9 @@
 //!
 //! It is the one panel that writes: the list lives in `<config>/todos.json`,
 //! is loaded at start-up and saved after every change, so it survives a
-//! restart without anything else having to know about it. Nothing is kept
-//! after it is done — ticking a line off takes it off the list for good.
+//! restart without anything else having to know about it. Ticking a line off
+//! marks it done (and ticking it again brings it back); deleting it — one at a
+//! time, or every done line at once — is what takes it off the list.
 
 use std::fs;
 use std::path::PathBuf;
@@ -28,9 +29,36 @@ pub struct Todo {
     pub text: String,
     /// Unix milliseconds.
     pub created_at: u64,
+    /// Ticked off. Lists saved before there was such a thing read as not done.
+    #[serde(default)]
+    pub done: bool,
+    /// When it was ticked off, Unix milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub done_at: Option<u64>,
 }
 
-/// The list as the webview sees it, newest first.
+impl Todo {
+    pub fn new(id: String, text: String, created_at: u64) -> Self {
+        Self { id, text, created_at, done: false, done_at: None }
+    }
+}
+
+/// The order the list is always kept in: what is still to do, newest first,
+/// then what is done, most recently done first. The cap cuts from the end, so
+/// the first lines to go are the ones finished longest ago.
+fn sort(todos: &mut [Todo]) {
+    todos.sort_by(|a, b| {
+        a.done.cmp(&b.done).then_with(|| {
+            if a.done {
+                b.done_at.unwrap_or(b.created_at).cmp(&a.done_at.unwrap_or(a.created_at))
+            } else {
+                b.created_at.cmp(&a.created_at)
+            }
+        })
+    });
+}
+
+/// The list as the webview sees it, in `sort` order.
 #[derive(Default)]
 pub struct TodoHub(Mutex<Vec<Todo>>);
 
@@ -71,22 +99,28 @@ enum Origin {
 }
 
 /// Applies a change, saves it and tells the webview — and, for a change made
-/// here, sync: a line that is new is an upsert, one that is gone is a delete.
+/// here, sync: a line that is new or changed (ticked, unticked) is an upsert,
+/// one that is gone is a delete.
 ///
-/// The list is a glance, not a backlog: past `MAX_TODOS` the oldest lines fall
-/// off the end. That holds wherever the line that pushed them off came from,
-/// and a line that falls off goes on every device, so the phone and the notch
-/// keep showing the same list.
+/// The list is a glance, not a backlog: past `MAX_TODOS` lines fall off the
+/// end, which `sort` makes the ones finished longest ago. That holds wherever
+/// the line that pushed them off came from, and a line that falls off goes on
+/// every device, so the phone and the notch keep showing the same list.
 fn edit(app: &AppHandle, origin: Origin, change: impl FnOnce(&mut Vec<Todo>)) {
-    let (added, removed) = {
+    let (changed, removed) = {
         let hub = app.state::<TodoHub>();
         let mut guard = hub.0.lock().unwrap();
         let before = guard.clone();
         change(&mut guard);
+        sort(&mut guard);
         let dropped: Vec<String> =
             if guard.len() > MAX_TODOS { guard.split_off(MAX_TODOS).into_iter().map(|todo| todo.id).collect() } else { Vec::new() };
-        let added: Vec<Todo> = match origin {
-            Origin::Here => guard.iter().filter(|todo| !before.iter().any(|old| old.id == todo.id)).cloned().collect(),
+        let changed: Vec<Todo> = match origin {
+            Origin::Here => guard
+                .iter()
+                .filter(|todo| before.iter().find(|old| old.id == todo.id) != Some(*todo))
+                .cloned()
+                .collect(),
             Origin::Sync => Vec::new(),
         };
         let mut removed: Vec<String> = match origin {
@@ -109,10 +143,10 @@ fn edit(app: &AppHandle, origin: Origin, change: impl FnOnce(&mut Vec<Todo>)) {
             save(app, &guard);
             let _ = app.emit("bangs://todos", guard.clone());
         }
-        (added, removed)
+        (changed, removed)
     };
 
-    for todo in &added {
+    for todo in &changed {
         sync::todo_upsert(app, todo);
     }
     for id in &removed {
@@ -145,8 +179,26 @@ pub fn todo_add(app: AppHandle, text: String) {
     }
     let created_at = now_ms();
     edit(&app, Origin::Here, |todos| {
-        todos.insert(0, Todo { id: next_id(created_at), text, created_at });
+        todos.insert(0, Todo::new(next_id(created_at), text, created_at));
     });
+}
+
+/// Ticks a line off, or brings a done line back.
+#[tauri::command]
+pub fn todo_toggle(app: AppHandle, id: String) {
+    let now = now_ms();
+    edit(&app, Origin::Here, |todos| {
+        if let Some(todo) = todos.iter_mut().find(|todo| todo.id == id) {
+            todo.done = !todo.done;
+            todo.done_at = todo.done.then_some(now);
+        }
+    });
+}
+
+/// Every done line, gone at once.
+#[tauri::command]
+pub fn todo_clear_done(app: AppHandle) {
+    edit(&app, Origin::Here, |todos| todos.retain(|todo| !todo.done));
 }
 
 /// Unique for the life of the list: two items added in the same millisecond
@@ -156,14 +208,14 @@ fn next_id(created_at: u64) -> String {
     format!("{created_at:x}-{:x}", COUNT.fetch_add(1, Ordering::Relaxed))
 }
 
-/// Ticked off, or thought better of: either way the line is gone.
+/// Deleted: the line is gone, here and on the phone.
 #[tauri::command]
 pub fn todo_remove(app: AppHandle, id: String) {
     edit(&app, Origin::Here, |todos| todos.retain(|todo| todo.id != id));
 }
 
-/// Takes in what came from the phone: lines added or edited there, lines
-/// ticked off there.
+/// Takes in what came from the phone: lines added, ticked or unticked there,
+/// lines deleted there.
 #[cfg_attr(not(all(target_os = "macos", feature = "icloud")), allow(dead_code))]
 pub fn apply_remote(app: &AppHandle, records: Vec<Record>) {
     edit(app, Origin::Sync, |todos| merge_remote(todos, &records));
@@ -191,8 +243,8 @@ fn merge_remote(todos: &mut Vec<Todo>, records: &[Record]) {
             None => todos.push(incoming),
         }
     }
-    // Newest first, whatever order the records arrived in.
-    todos.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    // `edit` sorts whatever order the records arrived in.
+    sort(todos);
 }
 
 #[cfg(test)]
@@ -202,7 +254,41 @@ mod tests {
     use super::*;
 
     fn todo(id: &str, text: &str, created_at: u64) -> Todo {
-        Todo { id: id.into(), text: text.into(), created_at }
+        Todo::new(id.into(), text.into(), created_at)
+    }
+
+    fn done(id: &str, created_at: u64, done_at: u64) -> Todo {
+        Todo { done: true, done_at: Some(done_at), ..todo(id, "x", created_at) }
+    }
+
+    #[test]
+    fn open_lines_come_first_then_the_most_recently_done() {
+        let mut todos = vec![done("d-old", 1, 10), todo("a", "x", 5), done("d-new", 2, 20), todo("b", "x", 9)];
+        sort(&mut todos);
+        let ids: Vec<&str> = todos.iter().map(|todo| todo.id.as_str()).collect();
+        assert_eq!(ids, ["b", "a", "d-new", "d-old"]);
+    }
+
+    #[test]
+    fn a_ticked_line_from_the_phone_arrives_done() {
+        let mut todos = vec![todo("a", "milk", 5)];
+        merge_remote(&mut todos, &[record("a", false, json!({ "text": "milk", "createdAt": 5, "done": true, "doneAt": 30 }))]);
+        assert_eq!(todos, vec![done("a", 5, 30).with_text("milk")]);
+    }
+
+    #[test]
+    fn lists_saved_before_done_existed_still_load() {
+        let old: Vec<Todo> = serde_json::from_str(r#"[{"id":"a","text":"milk","createdAt":5}]"#).unwrap();
+        assert_eq!(old, vec![todo("a", "milk", 5)]);
+        let written = serde_json::to_value(&old[0]).unwrap();
+        assert!(written.get("doneAt").is_none(), "an open line writes no doneAt");
+    }
+
+    impl Todo {
+        fn with_text(mut self, text: &str) -> Self {
+            self.text = text.into();
+            self
+        }
     }
 
     fn record(id: &str, deleted: bool, body: serde_json::Value) -> Record {
@@ -214,7 +300,7 @@ mod tests {
 
     #[test]
     fn a_line_from_the_phone_joins_the_list_newest_first() {
-        let mut todos = vec![todo("a", "old", 10), todo("b", "newer", 30)];
+        let mut todos = vec![todo("b", "newer", 30), todo("a", "old", 10)];
         merge_remote(&mut todos, &[record("c", false, json!({ "text": "from phone", "createdAt": 20 }))]);
         let ids: Vec<&str> = todos.iter().map(|todo| todo.id.as_str()).collect();
         assert_eq!(ids, ["b", "c", "a"]);
