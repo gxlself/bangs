@@ -204,10 +204,22 @@ pub fn todo_toggle(app: AppHandle, id: String) {
     });
 }
 
-/// Every done line, gone at once.
+/// "Clear done": the lines that were done when it was asked and still are —
+/// not one ticked since, nor one unticked on the phone while it blew away.
+/// Returns the ids it took off.
 #[tauri::command]
-pub fn todo_clear_done(app: AppHandle) {
-    edit(&app, Origin::Here, |todos| todos.retain(|todo| !todo.done));
+pub fn todo_clear_done(app: AppHandle, ids: Vec<String>) -> Vec<String> {
+    let mut removed = Vec::new();
+    edit(&app, Origin::Here, |todos| {
+        todos.retain(|todo| {
+            let goes = todo.done && ids.contains(&todo.id);
+            if goes {
+                removed.push(todo.id.clone());
+            }
+            !goes
+        })
+    });
+    removed
 }
 
 /// Unique for the life of the list: two items added in the same millisecond

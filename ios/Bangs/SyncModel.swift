@@ -476,7 +476,7 @@ final class SyncModel: ObservableObject {
         }
     }
 
-    /// Asks once, when it can be understood: the first time the Dev tab is opened, or when the
+    /// Asks once, when it can be understood: the first time the Code tab shows a session, or when the
     /// switch in Settings is turned on.
     func requestNotificationPermission() {
         guard notifyWaiting else { return }

@@ -59,6 +59,12 @@ public actor CloudEngine {
     static let maxSystemFields = 4000
     /// A clipboard picture rides in the record's encrypted values, which share its 1 MB limit.
     static let maxImageBytes = 900_000
+    /// Bytes a request carries inline — bodies and clipboard pictures; CKAssets go separately.
+    /// More than this goes in another request: CloudKit turns big requests away.
+    static let maxRequestBytes = 1_500_000
+    /// The cached system fields go to disk at most this often; a lost update only costs a
+    /// round trip.
+    static let systemFieldsSaveInterval: TimeInterval = 10
 
     static let recordType = "BangsRecord"
     static let zoneName = "Bangs"
@@ -84,11 +90,16 @@ public actor CloudEngine {
     /// Account status and user the last `start()` saw, so a CKAccountChanged that changes
     /// nothing does not restart anything.
     private var lastAccountKey: String?
-    /// recordName → the record's system fields as last seen, so a change is saved on top of the
-    /// server's version instead of colliding with it first.
-    private var systemFields: [String: Data] = [:]
+    /// recordName → the record's system fields as last seen and the version they belong to, so
+    /// a change is saved on top of the server's copy instead of colliding with it first.
+    private var systemFields: [String: CachedFields] = [:]
     private var systemFieldsLoaded = false
     private var systemFieldsDirty = false
+    private var systemFieldsSavedAt = Date.distantPast
+    /// A fetch that left out `asset` left out `body` too: fetch whole records. Also on disk, but
+    /// kept here as well so a file that cannot be written does not mean fetching the same page
+    /// forever.
+    private var fullFetch = false
     /// The zone went missing; the next successful setup reports `reset("zone")`.
     private var zoneLost = false
 
@@ -230,17 +241,50 @@ public actor CloudEngine {
         }
 
         var firstFailure: CloudStatus? = nil
-        var offset = 0
-        while offset < unique.count {
-            let end = min(offset + CloudEngine.maxBatch, unique.count)
-            let failure = await pushBatch(Array(unique[offset..<end]))
+        for chunk in requests(for: unique) {
+            let failure = await pushBatch(chunk)
             if firstFailure == nil {
                 firstFailure = failure
             }
-            offset = end
         }
+        saveSystemFields()
         if stopped { return }
         await emit(.status(firstFailure ?? .idle))
+    }
+
+    /// Groups of at most `maxBatch` records whose inline bytes stay under `maxRequestBytes`;
+    /// a record bigger than that on its own still goes, alone.
+    private func requests(for records: [SyncRecord]) -> [[SyncRecord]] {
+        var groups: [[SyncRecord]] = []
+        var current: [SyncRecord] = []
+        var bytes = 0
+        for record in records {
+            let size = inlineBytes(of: record)
+            if !current.isEmpty,
+               current.count >= CloudEngine.maxBatch || bytes + size > CloudEngine.maxRequestBytes {
+                groups.append(current)
+                current = []
+                bytes = 0
+            }
+            current.append(record)
+            bytes += size
+        }
+        if !current.isEmpty {
+            groups.append(current)
+        }
+        return groups
+    }
+
+    /// Roughly what a record adds to a request: its body, its picture, a little for the rest.
+    private func inlineBytes(of record: SyncRecord) -> Int {
+        var size = record.body.jsonString.utf8.count + 512
+        if record.kind == "clip", let path = record.asset,
+           let attributes = try? FileManager.default.attributesOfItem(atPath: path),
+           let fileSize = (attributes[.size] as? NSNumber)?.intValue,
+           fileSize <= CloudEngine.maxImageBytes {
+            size += fileSize
+        }
+        return size
     }
 
     /// The system says the iCloud account changed. Starts over only when it really did: the
@@ -355,10 +399,14 @@ public actor CloudEngine {
                 }
                 switch ckError.code {
                 case .changeTokenExpired:
-                    // The server no longer knows our token: start over. Records we already
-                    // have come back as echoes and are ignored by the merge rules.
+                    // The server no longer knows our token. Either it is just old, or the zone
+                    // was deleted and made again by another device, and what this device put
+                    // there is gone. Start over and have the caller put its records back: ones
+                    // still there come back as echoes, which the merge rules ignore.
                     changeToken = nil
                     saveToken()
+                    forgetSystemFields()
+                    await emit(.reset("zone"))
                 case .zoneNotFound, .userDeletedZone:
                     // ensureSetup recreates it and reports reset("zone"), so the caller puts
                     // everything back; the fetch then starts from an empty zone.
@@ -426,13 +474,17 @@ public actor CloudEngine {
     /// nil (everything) where files are kept; the fields without `asset` on the Mac, which only
     /// ever gets back the files it uploaded — unless that turned out to drop `body` too.
     private func fieldsToFetch() -> [CKRecord.FieldKey]? {
-        if keepAssets { return nil }
+        if keepAssets || fullFetch { return nil }
         let flag = stateDirectory.appendingPathComponent(CloudEngine.fullFetchFileName)
-        if FileManager.default.fileExists(atPath: flag.path) { return nil }
+        if FileManager.default.fileExists(atPath: flag.path) {
+            fullFetch = true
+            return nil
+        }
         return CloudEngine.fieldsWithoutAsset
     }
 
     private func disablePartialFetch() {
+        fullFetch = true
         try? FileManager.default.createDirectory(at: stateDirectory, withIntermediateDirectories: true)
         let flag = stateDirectory.appendingPathComponent(CloudEngine.fullFetchFileName)
         try? Data().write(to: flag)
@@ -440,14 +492,14 @@ public actor CloudEngine {
 
     // MARK: Pushing
 
-    /// Pushes up to `maxBatch` records. Emits pushed / rejected / records / failed, and returns
-    /// the status the push should end with when something failed.
+    /// Pushes one request's worth of records. Emits pushed / rejected / records / failed, and
+    /// returns the status the push should end with when something failed.
     private func pushBatch(_ batch: [SyncRecord]) async -> CloudStatus? {
         var ours: [String: SyncRecord] = [:]
-        var toSave: [CKRecord] = []
+        var first: [CKRecord] = []
         for record in batch {
             ours[record.key] = record
-            toSave.append(makeCKRecord(record))
+            first.append(makeCKRecord(record))
         }
 
         var pushed: [String] = []
@@ -468,9 +520,13 @@ public actor CloudEngine {
             }
         }
 
-        var round = 0
-        while !toSave.isEmpty {
-            round += 1
+        // Requests still to send: conflicts go round again, and a request CloudKit finds too
+        // big is split in two.
+        var queue: [[CKRecord]] = [first]
+        // How many answers each key has had: a conflict gets `maxConflictRounds` tries.
+        var answers: [String: Int] = [:]
+        while !queue.isEmpty {
+            let toSave = queue.removeFirst()
             var again: [CKRecord] = []
             do {
                 let result = try await database.modifyRecords(
@@ -482,12 +538,15 @@ public actor CloudEngine {
                 for (recordID, outcome) in result.saveResults {
                     let key = recordID.recordName
                     guard let mine = ours[key] else { continue }
+                    let round = (answers[key] ?? 0) + 1
+                    answers[key] = round
                     switch outcome {
                     case .success(let saved):
                         remember(saved)
                         pushed.append(key)
                     case .failure(let error):
-                        if let ckError = error as? CKError, ckError.code == .unknownItem {
+                        let ckError = error as? CKError
+                        if ckError?.code == .unknownItem {
                             // Cached system fields of a record the server no longer has: save
                             // it as new.
                             forgetSystemFields(of: key)
@@ -496,9 +555,7 @@ public actor CloudEngine {
                             } else {
                                 noteFailure(key: key, message: error.localizedDescription, retryAfter: nil)
                             }
-                        } else if let ckError = error as? CKError,
-                           ckError.code == .serverRecordChanged,
-                           let server = ckError.serverRecord {
+                        } else if ckError?.code == .serverRecordChanged, let server = ckError?.serverRecord {
                             remember(server)
                             let theirs = serverVersion(of: server)
                             if theirs == mine.version {
@@ -517,7 +574,10 @@ public actor CloudEngine {
                                     winners.append(winner)
                                 }
                             }
-                        } else if isPermanent(error) {
+                        } else if ckError?.code == .limitExceeded && toSave.count > 1 {
+                            // Too big next to the others: on its own, then.
+                            queue.append([makeCKRecord(mine)])
+                        } else if isPermanent(error) || ckError?.code == .limitExceeded {
                             log("dropping \(key): \(error.localizedDescription)")
                             rejected.append(key)
                         } else {
@@ -529,9 +589,19 @@ public actor CloudEngine {
                         }
                     }
                 }
-                toSave = again
+                if !again.isEmpty {
+                    queue.append(again)
+                }
             } catch {
-                // The whole request failed (network, account, throttling, ...).
+                if let ckError = error as? CKError, ckError.code == .limitExceeded, toSave.count > 1 {
+                    // The request as a whole is too big: half each.
+                    let half = toSave.count / 2
+                    queue.insert(Array(toSave[half...]), at: 0)
+                    queue.insert(Array(toSave[..<half]), at: 0)
+                    continue
+                }
+                // The whole request failed (network, account, throttling, ...); the rest would
+                // fail the same way.
                 if isMissingZone(error) {
                     setupDone = false
                     zoneLost = true
@@ -539,14 +609,13 @@ public actor CloudEngine {
                 failureStatus = statusFor(error)
                 let message = error.localizedDescription
                 let retry = retryAfterSeconds(of: error)
-                for record in toSave {
+                for record in toSave + queue.flatMap({ $0 }) {
                     noteFailure(key: record.recordID.recordName, message: message, retryAfter: retry)
                 }
-                toSave = []
+                queue = []
             }
         }
 
-        saveSystemFields()
         if !pushed.isEmpty {
             await emit(.pushed(pushed))
         }
@@ -570,13 +639,17 @@ public actor CloudEngine {
 
     // MARK: CKRecord <-> SyncRecord
 
-    /// On top of the server's last known version when there is one, so the save does not
-    /// collide with it first; otherwise a new record.
+    /// On top of the server's copy as last seen, when this change is newer than that copy;
+    /// otherwise a new record. Saving on top of a change tag succeeds whatever the versions
+    /// say, so it must only be used where last-writer-wins says this change goes in anyway:
+    /// a change that lost a race with a pulled one goes in as new, the server answers with its
+    /// copy, and the conflict is settled by version like any other.
     private func makeCKRecord(_ record: SyncRecord) -> CKRecord {
         loadSystemFieldsIfNeeded()
         let ckRecord: CKRecord
-        if let data = systemFields[record.key],
-           let known = decodeSystemFields(data),
+        if let cached = systemFields[record.key],
+           Version.wins(record.version, cached.version),
+           let known = decodeSystemFields(cached.data),
            known.recordID.recordName == record.key,
            known.recordID.zoneID == zoneID {
             ckRecord = known
@@ -590,6 +663,14 @@ public actor CloudEngine {
 
     // MARK: System fields
 
+    /// What is kept of a record the server has, to save the next change on top of it.
+    struct CachedFields: Codable {
+        /// `CKRecord.encodeSystemFields` output, change tag included.
+        var data: Data
+        /// The version of the record those fields belong to.
+        var version: Version
+    }
+
     private var systemFieldsURL: URL {
         return stateDirectory.appendingPathComponent(CloudEngine.systemFieldsFileName)
     }
@@ -597,8 +678,9 @@ public actor CloudEngine {
     private func loadSystemFieldsIfNeeded() {
         if systemFieldsLoaded { return }
         systemFieldsLoaded = true
+        // An older file without versions does not decode: start empty, it only costs round trips.
         guard let data = try? Data(contentsOf: systemFieldsURL),
-              let saved = try? PropertyListDecoder().decode([String: Data].self, from: data)
+              let saved = try? PropertyListDecoder().decode([String: CachedFields].self, from: data)
         else {
             return
         }
@@ -608,7 +690,15 @@ public actor CloudEngine {
     private func remember(_ ckRecord: CKRecord) {
         guard ckRecord.recordType == CloudEngine.recordType else { return }
         loadSystemFieldsIfNeeded()
-        systemFields[ckRecord.recordID.recordName] = encodeSystemFields(ckRecord)
+        let name = ckRecord.recordID.recordName
+        if ((ckRecord["deleted"] as? Int64) ?? 0) != 0 {
+            // Tombstones are hardly ever written again: not worth a place.
+            if systemFields.removeValue(forKey: name) != nil {
+                systemFieldsDirty = true
+            }
+            return
+        }
+        systemFields[name] = CachedFields(data: encodeSystemFields(ckRecord), version: serverVersion(of: ckRecord))
         systemFieldsDirty = true
         if systemFields.count > CloudEngine.maxSystemFields {
             for key in systemFields.keys.prefix(systemFields.count / 2) {
@@ -629,12 +719,18 @@ public actor CloudEngine {
         systemFieldsLoaded = true
         systemFields = [:]
         systemFieldsDirty = true
-        saveSystemFields()
+        saveSystemFields(now: true)
     }
 
-    private func saveSystemFields() {
+    /// At most every `systemFieldsSaveInterval` unless `now`: a pull every 20 seconds should
+    /// not rewrite the file every time.
+    private func saveSystemFields(now: Bool = false) {
         if stopped || !systemFieldsDirty { return }
+        if !now && Date().timeIntervalSince(systemFieldsSavedAt) < CloudEngine.systemFieldsSaveInterval {
+            return
+        }
         systemFieldsDirty = false
+        systemFieldsSavedAt = Date()
         do {
             try FileManager.default.createDirectory(at: stateDirectory, withIntermediateDirectories: true)
             let encoder = PropertyListEncoder()

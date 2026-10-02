@@ -40,21 +40,30 @@ interface TodoStore {
 let holdTimer: number | undefined;
 
 export const useTodos = create<TodoStore>((set, get) => {
-  /** Turns `ids` to dust, then lets `gone` take them off the native list. */
-  const blowAway = (ids: string[], gone: () => Promise<void>) => {
+  /** Turns `ids` to dust, then lets `gone` take them off the native list.
+   *  `gone` may answer with the ids it did take off: the others come back. */
+  const blowAway = (ids: string[], gone: () => Promise<string[] | void>) => {
     const fresh = ids.filter((id) => !get().dusting.includes(id));
     if (!fresh.length) return;
     set({ dusting: [...get().dusting, ...fresh] });
     const stagger = Math.min((fresh.length - 1) * DUST_STAGGER_MS, DUST_STAGGER_MAX_MS);
+    const restore = (back: string[]) => {
+      if (back.length) set({ dusting: get().dusting.filter((id) => !back.includes(id)) });
+    };
     // The line goes for good, but only once there is nothing left of it:
     // the native list is what makes the row disappear.
     window.setTimeout(() => {
-      gone().catch((error) => {
-        console.warn("todo delete failed", error);
-        // Nothing took the rows away, so put them back rather than leave
-        // invisible lines on the list.
-        set({ dusting: get().dusting.filter((id) => !fresh.includes(id)) });
-      });
+      gone()
+        .then((taken) => {
+          // Unticked on the phone while it blew away: it stays, so it shows.
+          if (taken) restore(fresh.filter((id) => !taken.includes(id)));
+        })
+        .catch((error) => {
+          console.warn("todo delete failed", error);
+          // Nothing took the rows away, so put them back rather than leave
+          // invisible lines on the list.
+          restore(fresh);
+        });
     }, DUST_MS + stagger);
   };
 
@@ -89,7 +98,7 @@ export const useTodos = create<TodoStore>((set, get) => {
 
     clearDone() {
       const done = get().items.filter((item) => item.done).map((item) => item.id);
-      blowAway(done, () => native.todoClearDone());
+      blowAway(done, () => native.todoClearDone(done));
     },
 
     setTyping(typing) {

@@ -214,7 +214,8 @@ export const native = {
   todoAdd: (text: string) => invoke<void>("todo_add", { text }),
   todoToggle: (id: string) => invoke<void>("todo_toggle", { id }),
   todoRemove: (id: string) => invoke<void>("todo_remove", { id }),
-  todoClearDone: () => invoke<void>("todo_clear_done"),
+  /** Deletes those of `ids` that are still done; returns the ones it deleted. */
+  todoClearDone: (ids: string[]) => invoke<string[]>("todo_clear_done", { ids }),
   inspectFiles: (paths: string[]) => invoke<FileMeta[]>("shelf_inspect", { paths }),
   openFile: (path: string) => invoke<void>("open_file", { path }),
   revealFile: (path: string) => invoke<void>("reveal_file", { path }),

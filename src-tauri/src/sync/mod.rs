@@ -15,6 +15,7 @@
 mod cloud;
 mod ledger;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -55,10 +56,13 @@ const PULL_EVERY: u64 = 20;
 /// Seconds between attempts to reconnect while there is no usable account:
 /// signing in to iCloud later should be enough, no restart.
 const RECONNECT_EVERY: u64 = 300;
-/// Seconds between heartbeats: the phone treats a Mac it has not heard from in
-/// a while (asleep, quit) as offline instead of believing its sessions are
-/// still running.
-const HEARTBEAT_EVERY: u64 = 600;
+/// The same while connecting failed for a reason that passes — the network,
+/// iCloud having a moment: try again soon rather than in five minutes.
+const RECONNECT_SOON: u64 = 30;
+/// Milliseconds between heartbeats: the phone treats a Mac it has not heard
+/// from in a while (asleep, quit) as offline instead of believing its sessions
+/// are still running.
+const HEARTBEAT_EVERY_MS: u64 = 10 * 60 * 1000;
 /// How long the queue waits for the first pull before going out anyway.
 const PULL_GRACE_MS: u64 = 15_000;
 const DEFAULT_RETRY_SECS: u64 = 30;
@@ -97,6 +101,13 @@ struct Inner {
     sessions: Option<Vec<AgentSession>>,
     clips: Option<Vec<ClipItem>>,
     shelf: Option<Vec<ShelfEntry>>,
+    /// Record id → the status and detail a session was last sent with, and
+    /// since when. A Codex session's time is its log's mtime, which moves
+    /// with every line it writes; only a new status or question is news.
+    session_since: HashMap<String, (Value, Option<String>, u64)>,
+    /// When the last heartbeat was queued (ms), by the wall clock: after the
+    /// Mac wakes from sleep the next one goes at once.
+    last_heartbeat: u64,
 }
 
 #[derive(Default)]
@@ -132,8 +143,12 @@ fn now_ms() -> u64 {
         .unwrap_or_default()
 }
 
+/// A debug build (scripts/dev-icloud.sh) talks to CloudKit's Development
+/// environment and a release to Production: two databases, so two ledgers and
+/// two change tokens, though both builds share the app's config directory.
 fn sync_dir(app: &AppHandle) -> Option<PathBuf> {
-    app.path().app_config_dir().ok().map(|dir| dir.join("sync"))
+    let name = if cfg!(debug_assertions) { "sync-dev" } else { "sync" };
+    app.path().app_config_dir().ok().map(|dir| dir.join(name))
 }
 
 pub fn status(app: &AppHandle) -> SyncStatus {
@@ -230,6 +245,7 @@ fn enable(app: &AppHandle, from_scratch: bool) {
         inner.ready = false;
         inner.pulled = false;
         inner.retry_at = 0;
+        inner.last_heartbeat = 0;
         inner.state = "starting".into();
         inner.message = None;
         save(&inner);
@@ -352,18 +368,24 @@ fn pump(app: AppHandle, generation: u64) {
             return;
         }
         tick += 1;
-        let (ready, dir) = {
+        let (ready, dir, state, last_heartbeat) = {
             let inner = hub.inner.lock().unwrap();
-            (inner.ready, inner.dir.clone())
+            (inner.ready, inner.dir.clone(), inner.state.clone(), inner.last_heartbeat)
         };
         if ready && tick % PULL_EVERY == 0 {
             cloud::pull();
         }
-        // The first one right after start-up, then every ten minutes.
-        if tick % HEARTBEAT_EVERY == 2 {
+        // The first one right after start-up, then every ten minutes of real
+        // time — sleep included, so a Mac that just woke up says so at once.
+        if now_ms().saturating_sub(last_heartbeat) >= HEARTBEAT_EVERY_MS {
+            hub.inner.lock().unwrap().last_heartbeat = now_ms();
             heartbeat(&app);
         }
-        if !ready && tick % RECONNECT_EVERY == 0 {
+        let reconnect_every = match state.as_str() {
+            "error" | "unavailable" => RECONNECT_SOON,
+            _ => RECONNECT_EVERY,
+        };
+        if !ready && tick % reconnect_every == 0 {
             if let Some(dir) = dir {
                 cloud::start(&app, &dir);
             }
@@ -585,7 +607,7 @@ pub fn todo_from_record(record: &Record) -> Option<Todo> {
 
 // -------------------------------------------------- what the Mac mirrors
 
-/// Claude Code and Codex sessions, for the phone's Dev tab.
+/// Claude Code and Codex sessions, for the phone's Code tab.
 pub fn mirror_sessions(app: &AppHandle, sessions: &[AgentSession]) {
     app.state::<SyncHub>().inner.lock().unwrap().sessions = Some(sessions.to_vec());
     reconcile_sessions(app);
@@ -593,24 +615,40 @@ pub fn mirror_sessions(app: &AppHandle, sessions: &[AgentSession]) {
 
 fn reconcile_sessions(app: &AppHandle) {
     let Some((device, host)) = identity(app) else { return };
-    let Some(sessions) = app.state::<SyncHub>().inner.lock().unwrap().sessions.clone() else { return };
-    let desired = sessions
-        .iter()
-        .map(|session| Desired {
-            id: format!("{device}-{}", clean_id(&session.id)),
-            body: json!({
-                "agent": session.agent,
-                "name": session.name,
-                "project": session.project,
-                "path": session.path,
-                "status": session.status,
-                "detail": session.detail,
-                "statusAt": session.updated_at as u64,
-                "host": host,
-            }),
-            asset: None,
-        })
-        .collect();
+    let hub = app.state::<SyncHub>();
+    let desired = {
+        let mut inner = hub.inner.lock().unwrap();
+        let Some(sessions) = inner.sessions.clone() else { return };
+        let mut since = HashMap::new();
+        let desired = sessions
+            .iter()
+            .map(|session| {
+                let id = format!("{device}-{}", clean_id(&session.id));
+                let status = json!(session.status);
+                let status_at = match inner.session_since.get(&id) {
+                    Some((was, detail, at)) if *was == status && *detail == session.detail => *at,
+                    _ => session.updated_at as u64,
+                };
+                since.insert(id.clone(), (status.clone(), session.detail.clone(), status_at));
+                Desired {
+                    id,
+                    body: json!({
+                        "agent": session.agent,
+                        "name": session.name,
+                        "project": session.project,
+                        "path": session.path,
+                        "status": status,
+                        "detail": session.detail,
+                        "statusAt": status_at,
+                        "host": host,
+                    }),
+                    asset: None,
+                }
+            })
+            .collect::<Vec<_>>();
+        inner.session_since = since;
+        desired
+    };
     reconcile(app, SESSION, desired);
 }
 
@@ -628,6 +666,7 @@ pub fn mirror_clips(app: &AppHandle, items: &[ClipItem]) {
 
 fn reconcile_clips(app: &AppHandle) {
     let Some((device, host)) = identity(app) else { return };
+    let _pictures = CLIP_IMAGES.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let Some(items) = app.state::<SyncHub>().inner.lock().unwrap().clips.clone() else { return };
     let text_ids: Vec<i64> = items.iter().filter(|item| item.kind == ClipKind::Text).map(|item| item.id).collect();
     // Without the texts every id would change (they are hashes of the text),
@@ -669,40 +708,72 @@ fn reconcile_clips(app: &AppHandle) {
     reconcile(app, CLIP, desired);
 }
 
-/// The JPEG the phone gets for a copied picture, made once and kept in
-/// `<config>/sync/clips/<record id>.jpg` while the entry is in the window.
+/// Clipboard pictures are made and pruned one reconcile at a time: the
+/// clipboard poll and turning sync on can both get here at once.
+static CLIP_IMAGES: Mutex<()> = Mutex::new(());
+
+/// The picture the phone gets for a copied image, made once and kept in
+/// `<sync dir>/clips/<record id>.img` while the entry is in the window: the
+/// original when it is small enough and in a format the phone opens (a
+/// screenshot of text stays sharp), otherwise a JPEG made small enough.
 fn clip_image(app: &AppHandle, clip_id: i64, record_id: &str) -> Option<String> {
     let dir = sync_dir(app)?.join("clips");
-    let jpeg = dir.join(format!("{record_id}.jpg"));
-    if !jpeg.exists() {
+    let picture = dir.join(format!("{record_id}.img"));
+    if !picture.exists() {
         let bytes = crate::clipboard::image_bytes(app, clip_id)?;
         std::fs::create_dir_all(&dir).ok()?;
-        let raw = dir.join(format!("{record_id}.raw"));
-        std::fs::write(&raw, bytes).ok()?;
-        let made = shrink_to_jpeg(&raw, &jpeg);
-        let _ = std::fs::remove_file(&raw);
-        if !made {
+        // Made under another name and renamed: a half-written file would
+        // otherwise go out as it is, for as long as the entry is in the window.
+        let part = dir.join(format!("{record_id}.part"));
+        let made = if bytes.len() as u64 <= CLIP_IMAGE_BYTES && phone_opens(&bytes) {
+            std::fs::write(&part, &bytes).is_ok()
+        } else {
+            let raw = dir.join(format!("{record_id}.raw"));
+            let made = std::fs::write(&raw, &bytes).is_ok() && shrink_to_jpeg(&raw, &part);
+            let _ = std::fs::remove_file(&raw);
+            made
+        };
+        if !made || std::fs::rename(&part, &picture).is_err() {
+            let _ = std::fs::remove_file(&part);
             return None;
         }
     }
-    Some(jpeg.to_string_lossy().into_owned())
+    Some(picture.to_string_lossy().into_owned())
+}
+
+/// PNG, JPEG, GIF, TIFF or HEIC: what the phone's UIImage opens as it is.
+fn phone_opens(bytes: &[u8]) -> bool {
+    bytes.starts_with(&[0x89, b'P', b'N', b'G'])
+        || bytes.starts_with(&[0xFF, 0xD8, 0xFF])
+        || bytes.starts_with(b"GIF8")
+        || bytes.starts_with(b"II*\0")
+        || bytes.starts_with(b"MM\0*")
+        || (bytes.len() >= 12 && &bytes[4..8] == b"ftyp" && matches!(&bytes[8..12], b"heic" | b"heix" | b"mif1" | b"hevc"))
 }
 
 /// Turns any picture into a JPEG under `CLIP_IMAGE_BYTES`, smaller and rougher
-/// until it fits, with macOS's own `sips`.
+/// until it fits, with macOS's own `sips`. Never larger than it was.
 fn shrink_to_jpeg(source: &Path, target: &Path) -> bool {
     #[cfg(target_os = "macos")]
-    for (side, quality) in [(1600, 75), (1024, 60), (640, 50)] {
-        let made = std::process::Command::new("/usr/bin/sips")
-            .args(["-s", "format", "jpeg", "-s", "formatOptions", &quality.to_string(), "-Z", &side.to_string()])
-            .arg(source)
-            .arg("--out")
-            .arg(target)
-            .output()
-            .is_ok_and(|output| output.status.success());
-        let size = std::fs::metadata(target).map(|meta| meta.len()).unwrap_or(u64::MAX);
-        if made && size <= CLIP_IMAGE_BYTES {
-            return true;
+    {
+        let longest = longest_side(source);
+        for (side, quality) in [(1600u32, 75), (1024, 60), (640, 50)] {
+            let mut command = std::process::Command::new("/usr/bin/sips");
+            command.args(["-s", "format", "jpeg", "-s", "formatOptions", &quality.to_string()]);
+            // Only ever smaller: no `-Z` for a picture already within the side.
+            if longest.map_or(true, |longest| longest > side) {
+                command.args(["-Z", &side.to_string()]);
+            }
+            let made = command
+                .arg(source)
+                .arg("--out")
+                .arg(target)
+                .output()
+                .is_ok_and(|output| output.status.success());
+            let size = std::fs::metadata(target).map(|meta| meta.len()).unwrap_or(u64::MAX);
+            if made && size <= CLIP_IMAGE_BYTES {
+                return true;
+            }
         }
     }
     #[cfg(not(target_os = "macos"))]
@@ -711,14 +782,33 @@ fn shrink_to_jpeg(source: &Path, target: &Path) -> bool {
     false
 }
 
-/// Pictures of entries that have left the window are not needed any more.
+/// The longer of a picture's width and height, as `sips` reads it.
+#[cfg(target_os = "macos")]
+fn longest_side(path: &Path) -> Option<u32> {
+    let output = std::process::Command::new("/usr/bin/sips")
+        .args(["-g", "pixelWidth", "-g", "pixelHeight"])
+        .arg(path)
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let (key, value) = line.trim().split_once(':')?;
+            matches!(key.trim(), "pixelWidth" | "pixelHeight").then(|| value.trim().parse::<u32>().ok())?
+        })
+        .max()
+}
+
+/// Pictures of entries that have left the window are not needed any more, nor
+/// anything a conversion left behind.
 fn prune_clip_images(app: &AppHandle, keep: &std::collections::HashSet<String>) {
     let Some(dir) = sync_dir(app).map(|dir| dir.join("clips")) else { return };
     let Ok(entries) = std::fs::read_dir(&dir) else { return };
     for entry in entries.flatten() {
         let path = entry.path();
         let stem = path.file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_default();
-        if !keep.contains(&stem) {
+        let picture = path.extension().is_some_and(|extension| extension == "img");
+        if !picture || !keep.contains(&stem) {
             let _ = std::fs::remove_file(path);
         }
     }
@@ -848,6 +938,20 @@ mod tests {
         assert_eq!(id.matches('-').count(), 4);
         assert_eq!(&id[14..15], "4");
         assert_ne!(id, random_device_id());
+    }
+
+    #[test]
+    fn small_pictures_the_phone_opens_go_as_they_are() {
+        assert!(phone_opens(b"\x89PNG\r\n\x1a\n...."));
+        assert!(phone_opens(b"\xff\xd8\xff\xe0..JFIF"));
+        assert!(phone_opens(b"GIF89a......"));
+        assert!(phone_opens(b"MM\0*........"));
+        assert!(phone_opens(b"\0\0\0\x18ftypheic...."));
+        // A PDF or a bitmap goes through sips first.
+        assert!(!phone_opens(b"%PDF-1.7...."));
+        assert!(!phone_opens(b"BM.........."));
+        assert!(!phone_opens(b"\0\0\0\x18ftypisom...."));
+        assert!(!phone_opens(b""));
     }
 
     #[test]

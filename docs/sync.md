@@ -6,7 +6,7 @@ Bangs 像 Paste 一样，用 **CloudKit 私有数据库**同步，走用户自�
 
 ```
 ┌────────────── macOS · Bangs（Tauri） ──────────────┐        ┌──────── iOS · Bangs（SwiftUI） ────────┐
-│ todos / clipboard / dev / shelf                    │        │ To-do · 开发 · 剪贴板 · 文件架          │
+│ todos / clipboard / dev / shelf                    │        │ 待办 · 代码 · 剪贴板 · 暂存架           │
 │        │ 本地变更             ▲ 远端变更           │        │      ▲ 展示            │ 勾选/新增待办  │
 │   sync::Ledger（版本表 + 待推送队列，Rust）        │        │  RecordStore（版本表 + 队列，Swift）    │
 │        │ JSON                 │ JSON               │        │      │ 同一个 BangsCloud 引擎           │
@@ -24,9 +24,9 @@ Windows 版没有 iCloud，同步保持关闭，行为和以前完全一样。
 | --- | --- | --- | --- |
 | `todo` | 双向 | Mac 生成的 id，或 iOS 生成的 UUID | 勾选 = 完成（`done`，可以再勾回来），是对记录的修改；删除才写墓碑 |
 | `session` | Mac → iOS | `<device8>-<会话 id>` | Claude Code / Codex 会话的忙碌、等待、空闲；Mac 上消失的会话写墓碑 |
-| `clip` | Mac → iOS | `<device8>-<内容哈希>` | 最近 24 条剪贴板（面板的第一页）；文本带全文（≤ 8000 字符），图片转成 ≤ 900 KB 的 JPEG 端到端加密同步，文件只有预览文字。读不到 Paste 的数据库时这一轮不动，免得 id 全变 |
+| `clip` | Mac → iOS | `<device8>-<内容哈希>` | 最近 24 条剪贴板（面板的第一页）；文本带全文（≤ 8000 字符），图片端到端加密同步（≤ 900 KB，见下面的 `image`），文件只有预览文字。读不到 Paste 的数据库时这一轮不动，免得 id 全变 |
 | `device` | Mac → iOS | `<device8>` | 心跳：Mac 每 10 分钟写一次。手机上超过 20 分钟没有心跳的 Mac，它的会话显示为离线（睡眠、退出了 Bangs） |
-| `shelf` | Mac → iOS | `<device8>-<路径哈希>` | 文件架；≤ 25 MB（25,000,000 字节，十进制）的文件作为 CKAsset 上传，更大的只同步元数据。文件夹不同步 |
+| `shelf` | Mac → iOS | `<device8>-<路径哈希>` | 暂存架；≤ 25 MB（25,000,000 字节，十进制）的文件作为 CKAsset 上传，更大的只同步元数据。文件夹不同步 |
 
 - `device8` 是设备 id（随机 UUID，去掉连字符取前 8 位小写十六进制）。镜像类 kind 的 id 带设备前缀，
   所以两台 Mac 不会互相写墓碑；镜像只会清理**本设备**写过的记录。
@@ -55,13 +55,13 @@ Windows 版没有 iCloud，同步保持关闭，行为和以前完全一样。
 | `deleted` | Int64 | 1 = 墓碑。删除用墓碑而不是 `CKDatabase.deleteRecord`，这样落后的设备也能知道它没了 |
 | `body` | String | 下面的 JSON 文本，≤ 64 KB；墓碑写 `{}`。**写入 `record.encryptedValues["body"]`，不是普通字段**，读取同理 |
 | `asset` | Asset（可选） | 只有 `shelf` 用；普通字段（不加密） |
-| `image` | Bytes（可选） | 只有 `clip` 用：复制的图片，Mac 用 `sips` 转成 ≤ 900 KB 的 JPEG（最长边 1600 → 1024 → 640 逐级缩小）。**写入 `encryptedValues["image"]`**——CKAsset 没法端到端加密，截图可能和密码一样私密。传输格式里仍然是 `asset` 路径，引擎按 kind 决定放哪 |
+| `image` | Bytes（可选） | 只有 `clip` 用：复制的图片。不超过 900 KB 的 PNG / JPEG / GIF / TIFF / HEIC 原样发送（文字截图保持清晰），其它的 Mac 用 `sips` 转成 ≤ 900 KB 的 JPEG（最长边 1600 → 1024 → 640 逐级缩小，只缩不放）。**写入 `encryptedValues["image"]`**——CKAsset 没法端到端加密，截图可能和密码一样私密。传输格式里仍然是 `asset` 路径，引擎按 kind 决定放哪 |
 
 所有设备共用一种记录类型，是为了不让两端各自维护字段映射：加字段只改 `body`，不用动生产 schema。
 
 `body` 走 CloudKit 的 `encryptedValues`（iOS 15 / macOS 12 起可用，端到端加密，密钥只在用户自己的设备上）：
 剪贴板里可能有密码，不能让它以明文躺在 CloudKit Dashboard 里。代价是 `body` 不能被查询或建索引——我们只用变更流，不需要。
-`kind`、`updatedAt`、`device`、`deleted` 仍是普通字段（只暴露种类和时间）。文件架的文件本身没有加密，和 iCloud Drive 一样只有 Apple 的静态加密。
+`kind`、`updatedAt`、`device`、`deleted` 仍是普通字段（只暴露种类和时间）。暂存架的文件本身没有加密，和 iCloud Drive 一样只有 Apple 的静态加密。
 
 ### body
 
@@ -153,9 +153,10 @@ void    bangs_cloud_stop(void);
   检查方法是 `SecTaskCopyValueForEntitlement`（Paste 的 `ICloudCapability.swift` 同一个做法）。
   比 Paste 更严一点：`icloud-services` 里要有 `CloudKit`，`icloud-container-identifiers` 里要有
   `iCloud.com.gxlself.bangs`，因为打开一个签名里没列出的容器同样会崩。
-- `state_dir` 用来放变更令牌（`token.bin`）、当前 iCloud 账号（`account.txt`）和下载的资源
-  （`assets/<recordName 里的 : 换成 _>`，不进备份）。Mac 端不保留资源文件：文件架只从 Mac 往外发，
-  Mac 拉回来的只会是自己上传的那些。
+- `state_dir` 用来放变更令牌（`token.bin`）、当前 iCloud 账号（`account.txt`）、每条记录的 system fields
+  缓存（`systemfields.plist`）和下载的资源（`assets/<recordName 里的 : 换成 _>`，不进备份）。
+  Mac 端不保留资源文件：暂存架只从 Mac 往外发，Mac 拉取时用 `desiredKeys` 不取 `asset`。
+  万一这样取回来的记录没有加密的 `body`，引擎改成取整条记录，并留下 `fullfetch` 记住。
 - `callback` 可能在任意线程被调用；`event_json` 只在调用期间有效，需要自行拷贝。事件：
 
 ```jsonc
@@ -172,16 +173,22 @@ void    bangs_cloud_stop(void);
 - **每次 `pull` / `push` 都以一个 `status` 事件收尾**：开始时发 `syncing`，成功结束发 `idle`，失败发 `error`
   （带 `message`）。`records` / `pushed` / `rejected` / `failed` 事件排在这个收尾事件之前。
   调用方靠「`ready` 之后的第一个 `idle`」知道启动时的那次拉取已经完成，之后才推送离线期间攒下的队列。
-- 令牌过期（`changeTokenExpired`）时引擎自己丢掉令牌从头拉。
 - **`reset`**：zone 没了（`zoneNotFound` / `userDeletedZone`，比如在 Dashboard 里 Reset Development Environment）
-  时引擎重建 zone 并发 `{"event":"reset","reason":"zone"}`；`start()` 发现登录的 iCloud 账号和上次不同时
+  时引擎重建 zone 并发 `{"event":"reset","reason":"zone"}`；令牌过期（`changeTokenExpired`）也一样处理——
+  可能只是令牌太旧，也可能 zone 被删掉后已经被另一台设备重建，这台设备放上去的东西都没了：从头拉，
+  同时发 `reset("zone")` 让调用方把自己的记录重新放上去（还在的会以相同版本回来，被当作回声忽略）；`start()` 发现登录的 iCloud 账号和上次不同时
   （比较 `CKContainer.userRecordID()`，存在 `account.txt`）丢掉令牌并发 `{"event":"reset","reason":"account"}`。
   收到后调用方要把自己的数据**全部重新上传**：Mac 端清空版本表、重新收编待办、重新镜像其它三类；
   iOS 端遇到 `zone` 把本地的待办重新放进队列，遇到 `account` 清空本地存储（那是另一个账号的数据）。
   账号变化时（`CKAccountChanged` 通知）引擎会自己重新 `start()`；没登录（`notAuthenticated`）一律报 `noAccount`。
 - 引擎被 `stop()` 之后不再发任何事件，也不再保存令牌——停掉时正在进行的拉取不会把没人收的记录算作已拉取。
-- 推送时遇到不会因为重试而好转的错误（`invalidArguments`、`assetFileNotFound`、`permissionFailure`）
-  按 `rejected` 报告并在 stderr 留一行日志，不会每 30 秒重试一次、挡住后面的改动。
+- 推送时遇到不会因为重试而好转的错误（`invalidArguments`、`assetFileNotFound`、`permissionFailure`，
+  单独发送仍然 `limitExceeded` 的记录）按 `rejected` 报告并在 stderr 留一行日志，不会每 30 秒重试一次、挡住后面的改动。
+- 一个请求最多 25 条记录、内联字节（`body` 和剪贴板图片）不超过约 1.5 MB；CloudKit 仍说请求太大
+  （`limitExceeded`）时对半拆开重发。
+- 改动存在缓存的 system fields（change tag）之上，通常一个请求就成功。**只有这次改动的版本比缓存里的新时才用缓存**：
+  存在 change tag 之上的保存不看版本、一定成功，如果用它存一个在竞争中输掉的旧版本，就会盖掉服务器上更新的那份。
+  其余情况按新记录存，服务器回报 `serverRecordChanged`，按版本裁决。
 - 托盘手动打开同步时，Mac 端会删掉令牌从头拉一次：关着的时候到达的记录没人收，令牌不能信。
 
 - Mac 端不接收静默推送（Tauri 占着 AppDelegate），所以每 20 秒拉一次；托盘菜单的「立即同步」马上拉一次，
@@ -200,8 +207,11 @@ TestFlight / App Store / Developer ID 的包读写 Production，两边互相看�
 
 上生产之前，要在 CloudKit Dashboard 里把 Development 的 schema **Deploy to Production**，
 否则生产环境里没有 `BangsRecord` 这个记录类型，所有保存都会失败。部署之前，先在 Development 里
-至少同步过一个文件架里的文件：`asset` 字段是第一次有人存它时才建出来的，没建的字段不会被部署，
-生产环境里所有带文件的推送就都会失败。
+**至少同步过一个暂存架里的文件，并复制过一张图片**：`asset` 和 `image` 字段是第一次有人存它们时才建出来的，
+没建的字段不会被部署，生产环境里所有带文件或图片的推送就都会失败。
+
+Mac 上的调试版（`scripts/dev-icloud.sh`）连 Development，发布版连 Production。两者的配置目录相同，
+所以同步状态分开放：调试版在 `<配置目录>/sync-dev/`，发布版在 `<配置目录>/sync/`，令牌和版本表互不干扰。
 
 发布用的 `entitlements.icloud.plist` 写明了 `com.apple.developer.icloud-container-environment = Production`，
 联调用的写 `Development`：Developer ID 签名的 app 必须自己声明用哪个环境（Xcode 导出 Developer ID 时会自动加上）。
@@ -218,27 +228,20 @@ TestFlight / App Store / Developer ID 的包读写 Production，两边互相看�
 
 ## 已知限制
 
-- **没有在 Mac 和真机上跑过。** 这一套是在没有 Swift 工具链的环境里写的：Rust 部分有测试并在 macOS / Windows /
-  Linux 三个目标上通过了类型检查；Swift 部分没有真正编译过，只做了语法检查（tree-sitter），
-  并经过一轮对照 iOS SDK 接口文件逐行核对 API 签名的审查，没有找到编译错误——但第一次在 Mac 上
-  `swift test` 和 Xcode Run 时仍可能要修小问题。合并规则有共用的测试向量，CloudKit 那一层只能靠真机联调。
-- Mac 会把自己上传的文件架文件在下一次拉取时再下载一次（下载完马上丢掉，不占磁盘）。可以用 `desiredKeys`
-  不取 `asset` 来省掉，但加密的 `body` 在指定 `desiredKeys` 时是否照样返回没验证过——取不回来，手机加的待办
-  就会被静默丢掉，所以先不冒这个险。真机上确认之后可以改 `CloudEngine.fetchPages`。
+- **还没在真机上跑过。** CI（GitHub Actions，macOS）每次推送都会编译并测试 Swift 包、为模拟器编译 iOS App、
+  编译链接了 Swift 桥的 Mac 端，都没有警告；合并规则有两边共用的测试向量。但 CloudKit 那一层（请求、冲突、
+  推送、账号变化）只能靠真机联调，第一次跑时仍可能要修小问题——步骤见 [sync-testing.md](sync-testing.md)。
 - iOS 图标是从桌面端图标生成的（圆角方块放大铺满、四角补渐变、去掉透明通道），能过 App Store 的检查，
   但设计上值得找人出一张正式的。
-- 每次更新已有记录都要两个请求：引擎每次都新建 `CKRecord`，第一次必然撞 `serverRecordChanged`，
-  拿服务器那份再存一次。可以按 key 缓存 system fields 省掉一次，没做。
 - 「Claude 在等你」的手机通知是 App 被静默推送唤醒后发的本地通知：App 在后台时系统可能推迟或合并
-  静默推送（低电量模式下更明显），所以不保证秒到；App 在前台或回到前台时一定会到。
+  静默推送（低电量模式下更明显），所以不保证秒到；在多任务里划掉 App 之后系统不再唤醒它，要等下次打开。
+  App 在前台或回到前台时一定会到。
+- Mac 端没有静默推送（Tauri 占着 AppDelegate），手机上的改动最多 20 秒后到 Mac；托盘「立即同步」马上拉。
 - 关闭同步只是停止收发，iCloud 里已经同步的记录保留，手机上还看得到最后的状态。
-- iOS 端收到记录和保存变更令牌之间有几毫秒的间隙（事件要切到主线程处理）：恰好在这时被杀，会漏掉那一批记录。
-  `store.json` 丢失或损坏时 iOS 端会连令牌一起删掉重新全量拉取，只是这个窗口本身没补。
-  Mac 端没有这个问题：回调是同步的，Rust 存完数据才返回，引擎之后才存令牌。
 
 ## 不在第一阶段里的东西
 
 - 小组件、Live Activity、键盘扩展（Paste 有，Bangs 的 iOS 端暂时没有）。
-- 从 iOS 往 Mac 的文件架投递（分享扩展）。
+- 从 iOS 往 Mac 的暂存架投递（分享扩展）。
 - 清理 CloudKit 里的旧墓碑；目前只清本地版本表。
 - 一台设备离线超过 90 天后再上线，它手里的旧版本可能让已被清掉墓碑的待办复活。
