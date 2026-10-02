@@ -31,6 +31,26 @@ struct SettingsView: View {
                 }
 
                 Section(
+                    header: Text(t("通知", "Notifications")),
+                    footer: Text(t(
+                        "Mac 上的 Claude Code / Codex 会话停下来问你问题时提醒你。App 不在前台时靠 iCloud 的静默推送唤醒，系统可能会推迟。",
+                        "When a Claude Code or Codex session on your Mac stops to ask you something. With the app in the background this relies on iCloud's silent push, which the system may delay."
+                    ))
+                ) {
+                    Toggle(
+                        t("会话等你时通知", "Notify when a session waits"),
+                        isOn: Binding(get: { model.notifyWaiting }, set: { model.setNotifyWaiting($0) })
+                    )
+                    if model.notifyWaiting && model.notificationsDenied {
+                        Button(t("在系统设置里允许 Bangs 发通知", "Allow notifications in Settings")) {
+                            if let url = URL(string: UIApplication.openSettingsURLString) {
+                                UIApplication.shared.open(url)
+                            }
+                        }
+                    }
+                }
+
+                Section(
                     header: Text(t("关于", "About")),
                     footer: Text(environmentNote)
                 ) {

@@ -70,6 +70,7 @@ CloudKit 那一层（`CloudEngine`）没有自动化测试，要真机联调。
 | 某个 kind 的字段（body 里多一个字段） | `ios/Bangs/Models.swift`，同时更新 `docs/sync.md` |
 | 待办页 | `ios/Bangs/Views/TodoView.swift` |
 | 开发会话页（分组、排序、状态标签） | `ios/Bangs/Views/DevView.swift`，排序在 `Models.swift` 的 `SessionItem.isOrderedBefore` |
+| 「Claude 在等你」通知（何时发、文案、点了去哪） | `ios/Bangs/SyncModel.swift`（`announceWaiting`、`requestNotificationPermission`），前台展示和点击在 `AppDelegate.swift` |
 | 剪贴板页（点一下拷贝、提示） | `ios/Bangs/Views/ClipboardView.swift` |
 | 文件架页（预览、「太大未同步」） | `ios/Bangs/Views/ShelfView.swift`、`QuickLookPreview.swift`，文件路径在 `AssetFiles.swift` |
 | 设置页（iCloud 状态文案） | `ios/Bangs/Views/SettingsView.swift` |

@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import CloudKit
+import UserNotifications
 import BangsSyncCore
 import BangsCloud
 
@@ -23,6 +24,18 @@ private func loadDeviceID() -> String {
     return created
 }
 
+/// The tabs of the app, so a notification can open the right one.
+enum AppTab: Hashable {
+    case todo
+    case dev
+    case clipboard
+    case shelf
+}
+
+/// A waiting session older than this is not news: a first full sync must not announce
+/// yesterday's questions.
+private let waitingNewsMs: Int64 = 10 * 60 * 1000
+
 /// Everything the views read, and the only thing that talks to the sync engine.
 ///
 /// Flow: load the store from disk, start the engine; when it says `ready`, pull, and once that
@@ -41,6 +54,20 @@ final class SyncModel: ObservableObject {
     @Published private(set) var shelf: [ShelfItem] = []
     @Published private(set) var status: CloudStatus = .starting
     @Published private(set) var lastSync: Date? = nil
+    @Published var selectedTab: AppTab = .todo
+    /// Tell the user when a Claude Code or Codex session on a Mac stops to ask something.
+    /// Changed with `setNotifyWaiting(_:)`.
+    @Published private(set) var notifyWaiting: Bool = SyncModel.savedNotifyWaiting()
+    /// The system said no; Settings is the only way back.
+    @Published private(set) var notificationsDenied = false
+
+    private static let notifyWaitingKey = "bangs.notify.waiting"
+
+    /// On unless turned off.
+    private static func savedNotifyWaiting() -> Bool {
+        let saved = UserDefaults.standard.object(forKey: notifyWaitingKey) as? Bool
+        return saved ?? true
+    }
 
     let deviceID: String
     let stateDirectory: URL
@@ -272,10 +299,12 @@ final class SyncModel: ObservableObject {
                 break
             }
         case .records(let records):
+            let before = sessionStatuses(of: records)
             let adopted = store.applyRemote(records)
             if !adopted.isEmpty {
                 saveStore()
                 publish()
+                announceWaiting(adopted, before: before)
                 // A file taken off the Mac's shelf: its downloaded copy goes too.
                 for record in adopted where record.kind == "shelf" && record.deleted {
                     try? FileManager.default.removeItem(at: AssetFiles.url(forKey: record.key, stateDirectory: stateDirectory))
@@ -370,6 +399,82 @@ final class SyncModel: ObservableObject {
             try? await Task.sleep(nanoseconds: UInt64(seconds) * 1_000_000_000)
             if Task.isCancelled { return }
             await self?.pushOutbox()
+        }
+    }
+
+    // MARK: Notifications
+
+    func setNotifyWaiting(_ on: Bool) {
+        notifyWaiting = on
+        UserDefaults.standard.set(on, forKey: SyncModel.notifyWaitingKey)
+        if on {
+            requestNotificationPermission()
+        }
+    }
+
+    /// Asks once, when it can be understood: the first time the Dev tab is opened, or when the
+    /// switch in Settings is turned on.
+    func requestNotificationPermission() {
+        guard notifyWaiting else { return }
+        Task {
+            let center = UNUserNotificationCenter.current()
+            let settings = await center.notificationSettings()
+            switch settings.authorizationStatus {
+            case .notDetermined:
+                let granted = (try? await center.requestAuthorization(options: [.alert, .sound])) ?? false
+                notificationsDenied = !granted
+            case .denied:
+                notificationsDenied = true
+            default:
+                notificationsDenied = false
+            }
+        }
+    }
+
+    /// What each session in `records` was doing before they are applied.
+    private func sessionStatuses(of records: [SyncRecord]) -> [String: String] {
+        var statuses: [String: String] = [:]
+        for record in records where record.kind == "session" {
+            if let known = store.records[record.key], !known.deleted, let status = known.body["status"]?.stringValue {
+                statuses[record.key] = status
+            }
+        }
+        return statuses
+    }
+
+    /// A session that just stopped to ask something gets a notification; one that moved on
+    /// takes its notification with it.
+    private func announceWaiting(_ adopted: [SyncRecord], before: [String: String]) {
+        let center = UNUserNotificationCenter.current()
+        var settled: [String] = []
+        let now = nowMillis()
+        for record in adopted where record.kind == "session" {
+            let status = record.deleted ? nil : record.body["status"]?.stringValue
+            guard status == "waiting" else {
+                settled.append(record.key)
+                continue
+            }
+            guard notifyWaiting, before[record.key] != "waiting",
+                  let session = SessionItem(record: record),
+                  now - session.statusAt < waitingNewsMs
+            else {
+                continue
+            }
+            let content = UNMutableNotificationContent()
+            content.title = session.agent == "codex"
+                ? t("Codex 在等你", "Codex is waiting for you")
+                : t("Claude 在等你", "Claude is waiting for you")
+            content.subtitle = session.host.isEmpty ? session.project : session.project + " · " + session.host
+            content.body = session.detail ?? t("它停下来问你一件事，回到 Mac 上看看。", "It stopped to ask you something on your Mac.")
+            content.sound = .default
+            content.threadIdentifier = "sessions"
+            content.userInfo = ["tab": "dev"]
+            // One notification per session: a second question replaces the first.
+            let request = UNNotificationRequest(identifier: record.key, content: content, trigger: nil)
+            center.add(request) { _ in }
+        }
+        if !settled.isEmpty {
+            center.removeDeliveredNotifications(withIdentifiers: settled)
         }
     }
 

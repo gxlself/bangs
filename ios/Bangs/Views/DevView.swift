@@ -38,6 +38,10 @@ struct DevView: View {
             }
         }
         .navigationTitle(t("开发", "Dev"))
+        .onAppear {
+            // The moment "notify me when it waits" makes sense to ask about.
+            model.requestNotificationPermission()
+        }
         .settingsButton()
     }
 }

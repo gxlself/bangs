@@ -223,6 +223,8 @@ TestFlight / App Store / Developer ID 的包读写 Production，两边互相看�
   但设计上值得找人出一张正式的。
 - 每次更新已有记录都要两个请求：引擎每次都新建 `CKRecord`，第一次必然撞 `serverRecordChanged`，
   拿服务器那份再存一次。可以按 key 缓存 system fields 省掉一次，没做。
+- 「Claude 在等你」的手机通知是 App 被静默推送唤醒后发的本地通知：App 在后台时系统可能推迟或合并
+  静默推送（低电量模式下更明显），所以不保证秒到；App 在前台或回到前台时一定会到。
 - 关闭同步只是停止收发，iCloud 里已经同步的记录保留，手机上还看得到最后的状态。
 - iOS 端收到记录和保存变更令牌之间有几毫秒的间隙（事件要切到主线程处理）：恰好在这时被杀，会漏掉那一批记录。
   `store.json` 丢失或损坏时 iOS 端会连令牌一起删掉重新全量拉取，只是这个窗口本身没补。
@@ -231,7 +233,6 @@ TestFlight / App Store / Developer ID 的包读写 Production，两边互相看�
 ## 不在第一阶段里的东西
 
 - 小组件、Live Activity、键盘扩展（Paste 有，Bangs 的 iOS 端暂时没有）。
-- 「Claude 等你了」的手机提醒：CloudKit 静默推送能唤醒 iOS 端，下一步可以在唤醒时发本地通知。
 - 从 iOS 往 Mac 的文件架投递（分享扩展）。
 - 清理 CloudKit 里的旧墓碑；目前只清本地版本表。
 - 一台设备离线超过 90 天后再上线，它手里的旧版本可能让已被清掉墓碑的待办复活。
