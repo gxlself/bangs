@@ -40,8 +40,11 @@ const CLIP_CHARS: usize = 8_000;
 /// Bigger files stay on the Mac; the phone still sees that they exist.
 const SHELF_FILE_BYTES: u64 = 25_000_000;
 const TOMBSTONE_TTL_MS: u64 = 90 * 24 * 60 * 60 * 1000;
-/// Seconds between pulls; there is no push notification on this side.
-const PULL_EVERY: u64 = 60;
+/// Seconds between pulls; there is no push notification on this side, so this
+/// is how long a change made on the phone can take to show up here (the tray's
+/// "Sync now" does not wait). A zone-changes fetch is cheap; CloudKit allows
+/// far more than one every 20 s.
+const PULL_EVERY: u64 = 20;
 /// Seconds between attempts to reconnect while there is no usable account:
 /// signing in to iCloud later should be enough, no restart.
 const RECONNECT_EVERY: u64 = 300;
@@ -231,6 +234,27 @@ fn enable(app: &AppHandle) {
     cloud::start(app, &dir);
     let handle = app.clone();
     thread::spawn(move || pump(handle, generation));
+}
+
+/// The tray's "Sync now": pull right away, and send whatever is waiting
+/// without sitting out a retry delay.
+pub fn sync_now(app: &AppHandle) {
+    let hub = app.state::<SyncHub>();
+    if !hub.enabled.load(Ordering::Relaxed) {
+        return;
+    }
+    let (ready, dir) = {
+        let mut inner = hub.inner.lock().unwrap();
+        inner.retry_at = 0;
+        (inner.ready, inner.dir.clone())
+    };
+    if ready {
+        cloud::pull();
+        flush(app);
+    } else if let Some(dir) = dir {
+        // No usable account last time: look again.
+        cloud::start(app, &dir);
+    }
 }
 
 fn disable(app: &AppHandle) {

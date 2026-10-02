@@ -72,6 +72,8 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
             &CheckMenuItem::with_id(app, "icloud-sync", t("同步到 iPhone（iCloud）", "Sync with iPhone (iCloud)"), sync.supported, settings.icloud_sync && sync.supported, None::<&str>)?,
             #[cfg(target_os = "macos")]
             &MenuItem::with_id(app, "icloud-status", format!("    {}", sync::status_label(&sync)), false, None::<&str>)?,
+            #[cfg(target_os = "macos")]
+            &MenuItem::with_id(app, "icloud-sync-now", format!("    {}", t("立即同步", "Sync now")), sync.enabled, None::<&str>)?,
             &CheckMenuItem::with_id(app, "lyrics", t("显示歌词", "Show lyrics"), true, settings.lyrics_enabled, None::<&str>)?,
             &CheckMenuItem::with_id(app, "lyrics-translation", t("显示歌词翻译", "Show lyric translations"), settings.lyrics_enabled, settings.lyrics_translation_enabled, None::<&str>)?,
             &CheckMenuItem::with_id(app, "notify-claude", t("Claude 忙完时提醒", "Alert when Claude finishes"), true, settings.notify_claude_idle, None::<&str>)?,
@@ -143,6 +145,10 @@ fn handle_menu(app: &AppHandle, id: &str) {
             // Turning it on reads every panel's data and talks to iCloud; the
             // menu callback is no place for that.
             std::thread::spawn(move || sync::set_enabled(&handle, on));
+        }
+        "icloud-sync-now" => {
+            let handle = app.clone();
+            std::thread::spawn(move || sync::sync_now(&handle));
         }
         "clipboard-history" => {
             settings::update(app, |settings| {

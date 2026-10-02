@@ -161,7 +161,8 @@ void    bangs_cloud_stop(void);
   （带 `message`）。`records` / `pushed` / `rejected` / `failed` 事件排在这个收尾事件之前。
   调用方靠「`ready` 之后的第一个 `idle`」知道启动时的那次拉取已经完成，之后才推送离线期间攒下的队列。
 - 令牌过期（`changeTokenExpired`）时引擎自己丢掉令牌从头拉；`zoneNotFound` 时自己重建 zone。
-- Mac 端不接收静默推送（Tauri 占着 AppDelegate），所以每 60 秒拉一次，推送之后和唤醒之后也各拉一次。
+- Mac 端不接收静默推送（Tauri 占着 AppDelegate），所以每 20 秒拉一次；托盘菜单的「立即同步」马上拉一次，
+  并且不等失败后的重试间隔就把队列推出去。
 
 ## 环境、签名与权限
 

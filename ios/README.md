@@ -7,6 +7,8 @@ Bangs 的 iPhone / iPad 端：用 CloudKit 和 Mac 上的 Bangs 同步，看 Mac
 
 ## 快速开始
 
+第一次的话，先跑 `scripts/sync-preflight.sh` 看还缺什么，再照 [`docs/sync-testing.md`](../docs/sync-testing.md) 一步步测。
+
 需要：Xcode 15+、一个付费的 Apple Developer 账号（iCloud / 推送需要带 profile 的签名）、一台登录了 iCloud 的真机。
 
 ```bash

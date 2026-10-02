@@ -72,6 +72,9 @@ scripts/dev-icloud.sh                                  # then tray menu → "Syn
 (cd packages/BangsCloud && swift test)                 # Swift
 ```
 
+`scripts/sync-preflight.sh` lists whatever this Mac is still missing (Xcode, XcodeGen, the profile, the
+certificate, iCloud), and [docs/sync-testing.md](docs/sync-testing.md) walks through testing it end to end.
+
 `pnpm tauri dev --features icloud` also works for checking that the Swift bridge builds and links: the
 binary is unsigned there, so it reports "no iCloud entitlement" and never touches CloudKit. A release that
 can sync is `BANGS_ICLOUD=1 scripts/build-release.sh --mac`; see [docs/sync.md](docs/sync.md) for what the
