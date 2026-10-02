@@ -5,6 +5,12 @@ description = "A dynamic notch for macOS and Windows"
 authors = ["gxlself"]
 edition = "2021"
 
+[features]
+# Links packages/BangsCloud (CloudKit) into the macOS build, for syncing with
+# the iPhone app. Off by default: it needs a Swift toolchain, and the app has
+# to be signed with the iCloud entitlements to use it. See docs/sync.md.
+icloud = []
+
 [lib]
 # The `_lib` suffix may seem redundant but it is necessary
 # to make the lib name unique and wouldn't conflict with the bin name.

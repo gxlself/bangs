@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Development, with iCloud sync (scripts/dev-icloud.sh): the same as
+       entitlements.icloud.plist, but signed with an Apple Development
+       certificate, which puts the app on the CloudKit *Development* database —
+       the one the iOS app run from Xcode uses. -->
+  <key>com.apple.security.automation.apple-events</key>
+  <true/>
+  <key>com.apple.security.get-task-allow</key>
+  <true/>
+  <key>com.apple.application-identifier</key>
+  <string>W8L8ZJ3N2P.com.gxlself.bangs</string>
+  <key>com.apple.developer.team-identifier</key>
+  <string>W8L8ZJ3N2P</string>
+  <key>com.apple.developer.icloud-container-identifiers</key>
+  <array>
+    <string>iCloud.com.gxlself.bangs</string>
+  </array>
+  <key>com.apple.developer.icloud-services</key>
+  <array>
+    <string>CloudKit</string>
+  </array>
+  <key>com.apple.developer.aps-environment</key>
+  <string>development</string>
+</dict>
+</plist>

@@ -212,6 +212,8 @@ export const native = {
   inspectFiles: (paths: string[]) => invoke<FileMeta[]>("shelf_inspect", { paths }),
   openFile: (path: string) => invoke<void>("open_file", { path }),
   revealFile: (path: string) => invoke<void>("reveal_file", { path }),
+  /** Tells iCloud sync what is on the shelf: the list lives in this webview, not in the native side. */
+  shelfSync: (items: (FileMeta & { addedAt: number })[]) => invoke<void>("shelf_sync", { items }),
 };
 
 export const events = {

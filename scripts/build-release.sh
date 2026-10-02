@@ -56,7 +56,16 @@ if [[ $want_mac -eq 1 ]]; then
     notary=""
   fi
   # `pnpm build` empties dist/, which is where $out lives, so it is made after.
-  APPLE_SIGNING_IDENTITY="$identity" pnpm tauri build --bundles app,dmg
+  # BANGS_ICLOUD=1 builds the version that can sync with the iPhone app
+  # (docs/sync.md): the Swift bridge, the iCloud entitlements and the Developer ID
+  # provisioning profile from src-tauri/icloud/. Without it nothing changes.
+  extra=()
+  if [[ "${BANGS_ICLOUD:-}" == "1" ]]; then
+    [[ -f src-tauri/icloud/developer-id.provisionprofile ]] ||
+      { echo "BANGS_ICLOUD=1 需要 src-tauri/icloud/developer-id.provisionprofile（见该目录的 README）" >&2; exit 1; }
+    extra=(--features icloud --config src-tauri/tauri.icloud.conf.json)
+  fi
+  APPLE_SIGNING_IDENTITY="$identity" pnpm tauri build --bundles app,dmg ${extra[@]+"${extra[@]}"}
   bundle="$root/src-tauri/target/release/bundle"
   # Tauri's own name for the architecture; older bundles of other versions stay
   # in that directory, so the file is named, never globbed.

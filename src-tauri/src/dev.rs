@@ -461,6 +461,9 @@ pub fn start(app: AppHandle) {
                 .with_processes(ProcessRefreshKind::nothing().with_exe(UpdateKind::Always)),
         );
         let mut codex_probes = HashMap::new();
+        // Sync wants to hear the first pass even when there are no sessions at
+        // all, or the ones it knows from the last run would never be cleared.
+        let mut first_pass = true;
         loop {
             system.refresh_processes(ProcessesToUpdate::All, true);
             let mut claude = read_claude_sessions(&system);
@@ -482,6 +485,10 @@ pub fn start(app: AppHandle) {
                 }
                 changed
             };
+            if changed || first_pass {
+                crate::sync::mirror_sessions(&app, &next.sessions);
+            }
+            first_pass = false;
             if changed {
                 let _ = app.emit("bangs://dev", next);
             }

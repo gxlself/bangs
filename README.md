@@ -29,6 +29,12 @@ wants "Run anyway" once.
   at most a link — by writing a JSON file, or by posting to a loopback endpoint. The newest row
   shows beside the collapsed notch. See [docs/plugins.md](docs/plugins.md).
 
+- **iPhone & iPad app** (`ios/`): to-dos, the dev panel's Claude Code / Codex status, the clipboard and the
+  shelf on your phone, synced through your own iCloud (CloudKit, like Paste) — no server. To-dos go both
+  ways; the rest is the Mac's mirror, read-only on the phone. Off until you turn it on in the tray menu
+  ("Sync with iPhone"), and clipboard text is end-to-end encrypted in CloudKit. macOS only; Windows keeps
+  its data local. See [docs/sync.md](docs/sync.md).
+
 Screens with a hardware notch get wings around it; other screens get a virtual notch, which shrinks
 to a thin bar when nothing is happening (the tray menu can turn that off). Full-screen video, games
 and presentations get the screen to themselves: the notch collapses to that bar on macOS and hides
@@ -45,6 +51,31 @@ pnpm tauri build          # .app/.dmg on macOS, .msi/.exe on Windows
 ```
 
 Build each platform on that platform (Windows installers cannot be produced on macOS).
+
+### iPhone app and sync
+
+Plain `pnpm tauri dev` has no iCloud entitlements, so it runs with sync switched off (the tray menu says
+so); everything else works. To develop the iPhone app and the sync itself:
+
+```bash
+# once: the Apple Developer setup in docs/sync.md ("环境、签名与权限") — iCloud container,
+# two App IDs, and a Mac development profile saved as src-tauri/icloud/dev.provisionprofile
+
+# the iPhone app (needs Xcode 15+ and `brew install xcodegen`)
+cd ios && xcodegen generate && open Bangs.xcodeproj    # pick your iPhone, Run
+
+# the Mac side, signed for the CloudKit Development environment, same as the app from Xcode
+scripts/dev-icloud.sh                                  # then tray menu → "Sync with iPhone (iCloud)"
+
+# the merge rules, which both sides test against docs/sync-vectors.json
+(cd src-tauri && cargo test -- sync:: todos::)           # Rust
+(cd packages/BangsCloud && swift test)                 # Swift
+```
+
+`pnpm tauri dev --features icloud` also works for checking that the Swift bridge builds and links: the
+binary is unsigned there, so it reports "no iCloud entitlement" and never touches CloudKit. A release that
+can sync is `BANGS_ICLOUD=1 scripts/build-release.sh --mac`; see [docs/sync.md](docs/sync.md) for what the
+Developer ID profile needs and why the CloudKit schema has to be deployed to Production first.
 
 The tray menu — the menu bar icon on macOS, the notification area icon on Windows — controls
 show/hide, expand on hover, idle bar, lyrics, lyric translations, Claude alerts, display, language

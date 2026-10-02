@@ -126,6 +126,15 @@ pub fn copy(app: AppHandle, id: i64) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+/// The whole text of the text entries among `ids`, for sync.
+pub fn full_texts(app: &AppHandle, ids: &[i64]) -> std::collections::HashMap<i64, String> {
+    load(app)
+        .into_iter()
+        .filter(|clip| ids.contains(&clip.item.id) && clip.item.kind == ClipKind::Text && !clip.text.is_empty())
+        .map(|clip| (clip.item.id, clip.text))
+        .collect()
+}
+
 pub fn clear(app: AppHandle) -> Result<(), String> {
     save(&app, &[]);
     publish(&app, state_of(&[], super::PAGE));

@@ -8,6 +8,7 @@ mod media;
 mod platform;
 mod settings;
 mod shelf;
+mod sync;
 mod todos;
 mod tray;
 mod update;
@@ -128,6 +129,7 @@ pub fn run() {
             app.manage(ClipboardHub::default());
             app.manage(ActivityHub::default());
             app.manage(TodoHub::default());
+            app.manage(sync::SyncHub::default());
             app.manage(UpdateState::default());
 
             platform::prepare_window(&handle)?;
@@ -140,6 +142,7 @@ pub fn run() {
             clipboard::start(handle.clone());
             activities::start(handle.clone());
             todos::start(handle.clone());
+            sync::start(handle.clone());
             tray::create(&handle)?;
             update::start(handle.clone());
             Ok(())
@@ -165,6 +168,7 @@ pub fn run() {
             shelf::shelf_inspect,
             shelf::open_file,
             shelf::reveal_file,
+            sync::shelf_sync,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

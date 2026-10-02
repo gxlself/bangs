@@ -14,6 +14,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
+use crate::sync::{self, Record};
+
 /// The panel is a glance, not a backlog: the oldest lines drop off the end.
 const MAX_TODOS: usize = 60;
 /// One line of text. Anything longer belongs in a real task list.
@@ -59,9 +61,20 @@ pub fn start(app: AppHandle) {
     *app.state::<TodoHub>().0.lock().unwrap() = todos;
 }
 
-/// Applies a change, saves it and tells the webview.
-fn edit(app: &AppHandle, change: impl FnOnce(&mut Vec<Todo>)) {
-    let todos = {
+/// Where a change came from. What the user did here is told to sync; what
+/// sync brought in must not be told back to it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(all(target_os = "macos", feature = "icloud")), allow(dead_code))]
+enum Origin {
+    Here,
+    Sync,
+}
+
+/// Applies a change, saves it and tells the webview — and, for a change made
+/// here, sync: a line that is new is an upsert, one that is gone (ticked off,
+/// or pushed off the end of the list) is a delete.
+fn edit(app: &AppHandle, origin: Origin, change: impl FnOnce(&mut Vec<Todo>)) {
+    let (todos, added, removed) = {
         let hub = app.state::<TodoHub>();
         let mut guard = hub.0.lock().unwrap();
         let before = guard.clone();
@@ -70,7 +83,10 @@ fn edit(app: &AppHandle, change: impl FnOnce(&mut Vec<Todo>)) {
         if *guard == before {
             return;
         }
-        guard.clone()
+        let added: Vec<Todo> = guard.iter().filter(|todo| !before.iter().any(|old| old.id == todo.id)).cloned().collect();
+        let removed: Vec<String> =
+            before.iter().filter(|old| !guard.iter().any(|todo| todo.id == old.id)).map(|old| old.id.clone()).collect();
+        (guard.clone(), added, removed)
     };
 
     if let Some(path) = path(app) {
@@ -84,16 +100,30 @@ fn edit(app: &AppHandle, change: impl FnOnce(&mut Vec<Todo>)) {
         }
     }
     let _ = app.emit("bangs://todos", todos);
+
+    if origin == Origin::Here {
+        for todo in &added {
+            sync::todo_upsert(app, todo);
+        }
+        for id in &removed {
+            sync::todo_delete(app, id);
+        }
+    }
+}
+
+/// One line of plain text, as long as a line may be.
+fn one_line(text: &str) -> String {
+    text.trim().replace(['\n', '\r', '\t'], " ").chars().take(MAX_TEXT).collect()
 }
 
 #[tauri::command]
 pub fn todo_add(app: AppHandle, text: String) {
-    let text: String = text.trim().replace(['\n', '\r', '\t'], " ").chars().take(MAX_TEXT).collect();
+    let text = one_line(&text);
     if text.is_empty() {
         return;
     }
     let created_at = now_ms();
-    edit(&app, |todos| {
+    edit(&app, Origin::Here, |todos| {
         todos.insert(0, Todo { id: next_id(created_at), text, created_at });
     });
 }
@@ -108,5 +138,89 @@ fn next_id(created_at: u64) -> String {
 /// Ticked off, or thought better of: either way the line is gone.
 #[tauri::command]
 pub fn todo_remove(app: AppHandle, id: String) {
-    edit(&app, |todos| todos.retain(|todo| todo.id != id));
+    edit(&app, Origin::Here, |todos| todos.retain(|todo| todo.id != id));
+}
+
+/// Takes in what came from the phone: lines added or edited there, lines
+/// ticked off there.
+#[cfg_attr(not(all(target_os = "macos", feature = "icloud")), allow(dead_code))]
+pub fn apply_remote(app: &AppHandle, records: Vec<Record>) {
+    edit(app, Origin::Sync, |todos| merge_remote(todos, &records));
+}
+
+fn merge_remote(todos: &mut Vec<Todo>, records: &[Record]) {
+    for record in records {
+        if record.deleted {
+            todos.retain(|todo| todo.id != record.id);
+            continue;
+        }
+        let Some(mut incoming) = sync::todo_from_record(record) else { continue };
+        incoming.text = one_line(&incoming.text);
+        if incoming.text.is_empty() {
+            continue;
+        }
+        match todos.iter_mut().find(|todo| todo.id == incoming.id) {
+            Some(existing) => *existing = incoming,
+            None => todos.push(incoming),
+        }
+    }
+    // Newest first, whatever order the records arrived in.
+    todos.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn todo(id: &str, text: &str, created_at: u64) -> Todo {
+        Todo { id: id.into(), text: text.into(), created_at }
+    }
+
+    fn record(id: &str, deleted: bool, body: serde_json::Value) -> Record {
+        serde_json::from_value(json!({
+            "kind": "todo", "id": id, "updatedAt": 9, "device": "phone", "deleted": deleted, "body": body
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_line_from_the_phone_joins_the_list_newest_first() {
+        let mut todos = vec![todo("a", "old", 10), todo("b", "newer", 30)];
+        merge_remote(&mut todos, &[record("c", false, json!({ "text": "from phone", "createdAt": 20 }))]);
+        let ids: Vec<&str> = todos.iter().map(|todo| todo.id.as_str()).collect();
+        assert_eq!(ids, ["b", "c", "a"]);
+    }
+
+    #[test]
+    fn an_edit_from_the_phone_replaces_the_line() {
+        let mut todos = vec![todo("a", "before", 10)];
+        merge_remote(&mut todos, &[record("a", false, json!({ "text": "after", "createdAt": 10 }))]);
+        assert_eq!(todos, vec![todo("a", "after", 10)]);
+    }
+
+    #[test]
+    fn a_line_ticked_off_on_the_phone_goes() {
+        let mut todos = vec![todo("a", "x", 10), todo("b", "y", 20)];
+        merge_remote(&mut todos, &[record("a", true, json!({}))]);
+        assert_eq!(todos, vec![todo("b", "y", 20)]);
+    }
+
+    #[test]
+    fn what_the_phone_sends_is_made_into_one_short_line() {
+        let mut todos = Vec::new();
+        let long = format!("first\nsecond\t{}", "x".repeat(300));
+        merge_remote(
+            &mut todos,
+            &[
+                record("a", false, json!({ "text": long, "createdAt": 1 })),
+                record("b", false, json!({ "text": "   \n ", "createdAt": 2 })),
+                record("c", false, json!({ "createdAt": 3 })),
+            ],
+        );
+        assert_eq!(todos.len(), 1, "empty and malformed lines are dropped");
+        assert_eq!(todos[0].text.chars().count(), MAX_TEXT);
+        assert!(todos[0].text.starts_with("first second "));
+    }
 }

@@ -1,0 +1,10 @@
+{
+  "bundle": {
+    "macOS": {
+      "entitlements": "entitlements.icloud.plist",
+      "files": {
+        "embedded.provisionprofile": "icloud/developer-id.provisionprofile"
+      }
+    }
+  }
+}

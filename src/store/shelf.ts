@@ -68,3 +68,15 @@ export const useShelf = create<ShelfStore>()(
     { name: "bangs.shelf", partialize: ({ items }) => ({ items }) },
   ),
 );
+
+/** Sync mirrors the shelf to the iPhone app; it only knows what it is told. */
+function syncShelf() {
+  native.shelfSync(useShelf.getState().items).catch((error) => console.warn("shelf sync failed", error));
+}
+
+useShelf.subscribe((state, previous) => {
+  if (state.items !== previous.items) syncShelf();
+});
+
+/** Once at start-up, after `refresh` has dropped the files that went away. */
+export const syncShelfNow = syncShelf;

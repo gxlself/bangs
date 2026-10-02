@@ -21,6 +21,9 @@ pub struct Settings {
     pub lyrics_translation_enabled: bool,
     /// Windows only: record the clipboard into the panel's history.
     pub clipboard_history: bool,
+    /// macOS only: sync to-dos, dev sessions, clipboard and shelf with the
+    /// iPhone app through iCloud (see docs/sync.md).
+    pub icloud_sync: bool,
     /// `platform::display_label` of the monitor to attach to; `None` follows
     /// the primary monitor.
     pub display: Option<String>,
@@ -45,6 +48,8 @@ impl Default for Settings {
             lyrics_enabled: true,
             lyrics_translation_enabled: true,
             clipboard_history: true,
+            // Off until asked for, like Paste: clipboard text goes to iCloud.
+            icloud_sync: false,
             display: None,
             language: None,
             tab_order: Vec::new(),
@@ -125,6 +130,12 @@ mod tests {
     fn old_settings_keep_the_default_tab_order() {
         let settings: Settings = serde_json::from_str(r#"{"lyricsEnabled":true}"#).unwrap();
         assert!(settings.tab_order.is_empty());
+    }
+
+    #[test]
+    fn sync_is_off_until_it_is_turned_on() {
+        let settings: Settings = serde_json::from_str(r#"{"lyricsEnabled":true}"#).unwrap();
+        assert!(!settings.icloud_sync);
     }
 
     #[test]

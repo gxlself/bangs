@@ -5,6 +5,7 @@ use tauri_plugin_autostart::ManagerExt as _;
 
 use crate::i18n::t;
 use crate::settings::{self, SettingsState};
+use crate::sync;
 use crate::update;
 use crate::{geometry, platform, MAIN_WINDOW};
 
@@ -14,6 +15,8 @@ const LANGUAGE_PREFIX: &str = "language:";
 
 fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     let settings = app.state::<SettingsState>().get();
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
+    let sync = sync::status(app);
     let autostart = app.autolaunch().is_enabled().unwrap_or(false);
     let monitors = app
         .get_webview_window(MAIN_WINDOW)
@@ -65,6 +68,10 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
             &CheckMenuItem::with_id(app, "idle-handle", t("空闲时收成细条", "Shrink to a bar when idle"), true, settings.idle_handle, None::<&str>)?,
             #[cfg(windows)]
             &CheckMenuItem::with_id(app, "clipboard-history", t("记录剪贴板", "Record the clipboard"), true, settings.clipboard_history, None::<&str>)?,
+            #[cfg(target_os = "macos")]
+            &CheckMenuItem::with_id(app, "icloud-sync", t("同步到 iPhone（iCloud）", "Sync with iPhone (iCloud)"), sync.supported, settings.icloud_sync && sync.supported, None::<&str>)?,
+            #[cfg(target_os = "macos")]
+            &MenuItem::with_id(app, "icloud-status", format!("    {}", sync::status_label(&sync)), false, None::<&str>)?,
             &CheckMenuItem::with_id(app, "lyrics", t("显示歌词", "Show lyrics"), true, settings.lyrics_enabled, None::<&str>)?,
             &CheckMenuItem::with_id(app, "lyrics-translation", t("显示歌词翻译", "Show lyric translations"), settings.lyrics_enabled, settings.lyrics_translation_enabled, None::<&str>)?,
             &CheckMenuItem::with_id(app, "notify-claude", t("Claude 忙完时提醒", "Alert when Claude finishes"), true, settings.notify_claude_idle, None::<&str>)?,
@@ -129,6 +136,13 @@ fn handle_menu(app: &AppHandle, id: &str) {
         }
         "hover" => {
             settings::update(app, |settings| settings.expand_on_hover = !settings.expand_on_hover);
+        }
+        "icloud-sync" => {
+            let on = !app.state::<SettingsState>().get().icloud_sync;
+            let handle = app.clone();
+            // Turning it on reads every panel's data and talks to iCloud; the
+            // menu callback is no place for that.
+            std::thread::spawn(move || sync::set_enabled(&handle, on));
         }
         "clipboard-history" => {
             settings::update(app, |settings| {

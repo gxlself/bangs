@@ -101,7 +101,27 @@ fn publish(app: &AppHandle, next: ClipboardState) {
         }
         *current = next.clone();
     }
+    if next.available {
+        crate::sync::mirror_clips(app, &next.items);
+    }
     let _ = app.emit("bangs://clipboard", next);
+}
+
+/// The whole text of these text entries, by id, for sync: the panel itself
+/// only ever holds a preview. Pictures and files have no entry in the result.
+pub fn full_texts(app: &AppHandle, ids: &[i64]) -> std::collections::HashMap<i64, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = app;
+        return mac::full_texts(ids);
+    }
+    #[cfg(windows)]
+    return win::full_texts(app, ids);
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        let _ = (app, ids);
+        std::collections::HashMap::new()
+    }
 }
 
 pub fn start(app: AppHandle) {

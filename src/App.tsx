@@ -14,7 +14,7 @@ import { useActivities } from "./store/activities";
 import { useTodos } from "./store/todos";
 import { useClipboard } from "./store/clipboard";
 import { useNotch, type Section } from "./store/notch";
-import { useShelf, type AddResult } from "./store/shelf";
+import { syncShelfNow, useShelf, type AddResult } from "./store/shelf";
 
 export default function App() {
   const ready = useNotch((s) => s.ready);
@@ -63,6 +63,7 @@ export default function App() {
         useActivities.getState().update(boot.activities);
         useTodos.getState().update(boot.todos);
         await useShelf.getState().refresh();
+        syncShelfNow();
         useNotch.getState().init(boot);
         // Not requestAnimationFrame: hidden webviews never run frame callbacks.
         window.setTimeout(() => void native.ready(), 50);

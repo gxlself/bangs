@@ -22,3 +22,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# iCloud sync signing material (see src-tauri/icloud/README.md)
+*.provisionprofile
+*.mobileprovision

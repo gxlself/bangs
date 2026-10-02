@@ -1,0 +1,119 @@
+{
+  "_doc": "Conformance vectors for docs/sync.md. Rust (src-tauri/src/sync/ledger.rs) and Swift (packages/BangsCloud/Tests) both run these.",
+
+  "compare": [
+    { "name": "newer updatedAt wins whatever the device", "a": { "updatedAt": 2, "device": "a" }, "b": { "updatedAt": 1, "device": "z" }, "aWins": true },
+    { "name": "older updatedAt loses", "a": { "updatedAt": 1, "device": "z" }, "b": { "updatedAt": 2, "device": "a" }, "aWins": false },
+    { "name": "equal time: larger device wins", "a": { "updatedAt": 1, "device": "b" }, "b": { "updatedAt": 1, "device": "a" }, "aWins": true },
+    { "name": "equal time: smaller device loses", "a": { "updatedAt": 1, "device": "a" }, "b": { "updatedAt": 1, "device": "b" }, "aWins": false },
+    { "name": "identical versions: neither wins", "a": { "updatedAt": 1, "device": "a" }, "b": { "updatedAt": 1, "device": "a" }, "aWins": false }
+  ],
+
+  "nextStamp": [
+    { "name": "first version takes the clock", "prev": null, "now": 100, "stamp": 100 },
+    { "name": "clock behind the previous version: still goes forward", "prev": 100, "now": 90, "stamp": 101 },
+    { "name": "clock equal to the previous version: goes forward", "prev": 100, "now": 100, "stamp": 101 },
+    { "name": "clock ahead: takes the clock", "prev": 100, "now": 200, "stamp": 200 }
+  ],
+
+  "applyRemote": [
+    {
+      "name": "an unknown key is adopted",
+      "versions": [],
+      "incoming": [
+        { "kind": "todo", "id": "1", "updatedAt": 5, "device": "a", "deleted": false, "body": { "text": "x", "createdAt": 5 }, "asset": null }
+      ],
+      "applied": ["todo:1"],
+      "versionsAfter": [
+        { "key": "todo:1", "updatedAt": 5, "device": "a", "deleted": false }
+      ]
+    },
+    {
+      "name": "an older version is ignored",
+      "versions": [ { "key": "todo:1", "updatedAt": 10, "device": "mac", "deleted": false } ],
+      "incoming": [
+        { "kind": "todo", "id": "1", "updatedAt": 9, "device": "phone", "deleted": false, "body": { "text": "old", "createdAt": 1 }, "asset": null }
+      ],
+      "applied": [],
+      "versionsAfter": [ { "key": "todo:1", "updatedAt": 10, "device": "mac", "deleted": false } ]
+    },
+    {
+      "name": "a newer version wins",
+      "versions": [ { "key": "todo:1", "updatedAt": 10, "device": "mac", "deleted": false } ],
+      "incoming": [
+        { "kind": "todo", "id": "1", "updatedAt": 11, "device": "phone", "deleted": false, "body": { "text": "new", "createdAt": 1 }, "asset": null }
+      ],
+      "applied": ["todo:1"],
+      "versionsAfter": [ { "key": "todo:1", "updatedAt": 11, "device": "phone", "deleted": false } ]
+    },
+    {
+      "name": "our own record coming back from the change feed is an echo",
+      "versions": [ { "key": "todo:1", "updatedAt": 10, "device": "mac", "deleted": false } ],
+      "incoming": [
+        { "kind": "todo", "id": "1", "updatedAt": 10, "device": "mac", "deleted": false, "body": { "text": "same", "createdAt": 1 }, "asset": null }
+      ],
+      "applied": [],
+      "versionsAfter": [ { "key": "todo:1", "updatedAt": 10, "device": "mac", "deleted": false } ]
+    },
+    {
+      "name": "equal time is settled by the device id",
+      "versions": [ { "key": "todo:1", "updatedAt": 10, "device": "a", "deleted": false } ],
+      "incoming": [
+        { "kind": "todo", "id": "1", "updatedAt": 10, "device": "b", "deleted": false, "body": { "text": "b", "createdAt": 1 }, "asset": null }
+      ],
+      "applied": ["todo:1"],
+      "versionsAfter": [ { "key": "todo:1", "updatedAt": 10, "device": "b", "deleted": false } ]
+    },
+    {
+      "name": "a newer tombstone beats a live version",
+      "versions": [ { "key": "todo:1", "updatedAt": 10, "device": "mac", "deleted": false } ],
+      "incoming": [
+        { "kind": "todo", "id": "1", "updatedAt": 12, "device": "phone", "deleted": true, "body": {}, "asset": null }
+      ],
+      "applied": ["todo:1"],
+      "versionsAfter": [ { "key": "todo:1", "updatedAt": 12, "device": "phone", "deleted": true } ]
+    },
+    {
+      "name": "an older live version cannot bring a deleted one back",
+      "versions": [ { "key": "todo:1", "updatedAt": 12, "device": "phone", "deleted": true } ],
+      "incoming": [
+        { "kind": "todo", "id": "1", "updatedAt": 10, "device": "mac", "deleted": false, "body": { "text": "zombie", "createdAt": 1 }, "asset": null }
+      ],
+      "applied": [],
+      "versionsAfter": [ { "key": "todo:1", "updatedAt": 12, "device": "phone", "deleted": true } ]
+    },
+    {
+      "name": "a tombstone for a key we never saw is still remembered",
+      "versions": [],
+      "incoming": [
+        { "kind": "todo", "id": "1", "updatedAt": 5, "device": "phone", "deleted": true, "body": {}, "asset": null },
+        { "kind": "todo", "id": "1", "updatedAt": 4, "device": "mac", "deleted": false, "body": { "text": "late", "createdAt": 1 }, "asset": null }
+      ],
+      "applied": ["todo:1"],
+      "versionsAfter": [ { "key": "todo:1", "updatedAt": 5, "device": "phone", "deleted": true } ]
+    },
+    {
+      "name": "one batch is processed in order",
+      "versions": [],
+      "incoming": [
+        { "kind": "todo", "id": "1", "updatedAt": 5, "device": "a", "deleted": false, "body": { "text": "five", "createdAt": 1 }, "asset": null },
+        { "kind": "todo", "id": "1", "updatedAt": 7, "device": "a", "deleted": false, "body": { "text": "seven", "createdAt": 1 }, "asset": null },
+        { "kind": "todo", "id": "1", "updatedAt": 6, "device": "a", "deleted": false, "body": { "text": "six", "createdAt": 1 }, "asset": null }
+      ],
+      "applied": ["todo:1", "todo:1"],
+      "versionsAfter": [ { "key": "todo:1", "updatedAt": 7, "device": "a", "deleted": false } ]
+    },
+    {
+      "name": "kinds do not share versions even with the same id",
+      "versions": [ { "key": "todo:1", "updatedAt": 10, "device": "mac", "deleted": false } ],
+      "incoming": [
+        { "kind": "clip", "id": "1", "updatedAt": 1, "device": "mac", "deleted": false, "body": { "type": "text", "preview": "p" }, "asset": null }
+      ],
+      "applied": ["clip:1"],
+      "versionsAfter": [
+        { "key": "clip:1", "updatedAt": 1, "device": "mac", "deleted": false },
+        { "key": "todo:1", "updatedAt": 10, "device": "mac", "deleted": false }
+      ]
+    }
+  ]
+}
