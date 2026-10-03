@@ -54,7 +54,7 @@ void bangs_icloud_publish(const char *container, const char *record_name, const 
         CKRecordZone *zone = [[CKRecordZone alloc] initWithZoneID:zoneID];
         CKModifyRecordZonesOperation *zones =
             [[CKModifyRecordZonesOperation alloc] initWithRecordZonesToSave:@[ zone ] recordZoneIDsToDelete:nil];
-        zones.modifyRecordZonesResultBlock = ^(NSError *error) {
+        zones.modifyRecordZonesCompletionBlock = ^(NSArray *saved, NSArray *deleted, NSError *error) {
           if (error) NSLog(@"[watch] iCloud zone: %@", error);
         };
 
@@ -65,7 +65,7 @@ void bangs_icloud_publish(const char *container, const char *record_name, const 
             [[CKModifyRecordsOperation alloc] initWithRecordsToSave:@[ record ] recordIDsToDelete:nil];
         // Overwrite without fetching first: this Mac is the only writer.
         save.savePolicy = CKRecordSaveAllKeys;
-        save.modifyRecordsResultBlock = ^(NSError *error) {
+        save.modifyRecordsCompletionBlock = ^(NSArray *saved, NSArray *deleted, NSError *error) {
           if (error) NSLog(@"[watch] iCloud publish: %@", error);
         };
         [save addDependency:zones];
@@ -83,7 +83,7 @@ void bangs_icloud_remove(const char *container, const char *record_name) {
         CKRecordID *recordID = [[CKRecordID alloc] initWithRecordName:@(record_name) zoneID:ZoneID()];
         CKModifyRecordsOperation *remove =
             [[CKModifyRecordsOperation alloc] initWithRecordsToSave:nil recordIDsToDelete:@[ recordID ]];
-        remove.modifyRecordsResultBlock = ^(NSError *error) {
+        remove.modifyRecordsCompletionBlock = ^(NSArray *saved, NSArray *deleted, NSError *error) {
           if (error) NSLog(@"[watch] iCloud remove: %@", error);
         };
         [database addOperation:remove];
