@@ -8,6 +8,7 @@ on:
     paths:
       - "packages/**"
       - "ios/**"
+      - "watch/**"
       - "src-tauri/**"
       - "src/**"
       - "docs/sync-vectors.json"

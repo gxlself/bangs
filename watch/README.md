@@ -1,7 +1,9 @@
 # Bangs for Apple Watch
 
 手表上的 Bangs：一眼看 Mac 上在放什么、Claude / Codex 忙完没有，顺手切歌、记一条待办。
-它通过局域网连 Mac 上的 Bangs（协议见 [docs/watch.md](../docs/watch.md)），不需要 iPhone 上装任何东西。
+它通过局域网连 Mac 上的 Bangs（协议见 [docs/watch.md](../docs/watch.md)），不经过 iPhone 上的 Bangs。
+它跟着 iPhone 版一起发布（App Store 里是同一个 App，手表端包在 iPhone 包里），装好以后自己就能跑
+（`WKRunsIndependentlyOfCompanionApp`），iPhone 版删掉也不影响。
 
 纵向翻页（转表冠或上下滑）有四页：
 
@@ -16,21 +18,23 @@
 
 ## 要求
 
-- Xcode 16 或更新（工程用了文件夹同步，老版本打不开）
+- Xcode 16 或更新、XcodeGen（`brew install xcodegen`）
 - watchOS 10 或更新
 - Mac 上的 Bangs 是包含本功能的版本，手表和 Mac 在同一个局域网里
 
 ## 在模拟器上跑
 
-1. 打开 `watch/BangsWatch.xcodeproj`，scheme 选 `BangsWatch`，目标选一个 Apple Watch 模拟器，⌘R。
+1. 工程在 iPhone 版那边生成：`cd ios && xcodegen generate && open Bangs.xcodeproj`（target 定义在
+   `ios/project.yml` 的 `BangsWatch`，源码就是这个目录）。scheme 选 `BangsWatch`，目标选一个 Apple Watch 模拟器，⌘R。
 2. Mac 上的 Bangs：菜单栏图标 → **Apple Watch → 允许手表连接**。子菜单里会出现「地址」和「配对码」。
    如果 macOS 防火墙问是否允许 Bangs 接受传入的网络连接，选「允许」。
 3. 模拟器里填地址和 6 位配对码，点「配对」。模拟器和 Mac 是同一台机器，地址也可以直接填 `127.0.0.1`。
 
 ## 在真手表上跑
 
-1. 工程里选中 `BangsWatch` target → **Signing & Capabilities**，Team 选你的开发者账号；
-   如果 `com.gxlself.bangs.watch` 已被占用，把 Bundle Identifier 改成你自己的。
+1. Team 默认是 `W8L8ZJ3N2P`。换成自己的团队时，手表的 Bundle ID（`ios/project.yml` 里
+   `com.gxlself.bangs.ios.watchkitapp`）和 `WKCompanionAppBundleIdentifier` 要跟着 iPhone 版的一起改：
+   手表的 Bundle ID 必须以 iPhone 版的开头。
 2. iPhone 连着 Mac、手表和 iPhone 配对好，并打开手表的开发者模式（设置 → 隐私与安全性 → 开发者模式）。
 3. 目标选你的手表，⌘R。第一次装要在手表上信任开发者证书。
 4. 照上面第 2、3 步配对，地址填菜单里显示的那个（`192.168.x.x:17651`）。
@@ -56,8 +60,8 @@
 Debug 构建带一套演示数据（`BangsWatch/DemoData.swift`），不连网、不碰钥匙串，一次启动一张图：
 
 ```bash
-xcrun simctl launch <udid> com.gxlself.bangs.watch -BangsDemo YES -BangsPage playing   # sessions / todos / board
-xcrun simctl launch <udid> com.gxlself.bangs.watch -BangsDemo YES -BangsPage todos -AppleLanguages "(zh-Hans)"
+xcrun simctl launch <udid> com.gxlself.bangs.ios.watchkitapp -BangsDemo YES -BangsPage playing   # sessions / todos / board
+xcrun simctl launch <udid> com.gxlself.bangs.ios.watchkitapp -BangsDemo YES -BangsPage todos -AppleLanguages "(zh-Hans)"
 xcrun simctl io <udid> screenshot shot.png
 ```
 

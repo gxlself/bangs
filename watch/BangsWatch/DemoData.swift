@@ -4,7 +4,7 @@ import SwiftUI
 /// Sample content for the App Store screenshots, which are taken in the simulator with no Mac
 /// to pair with. Debug builds only:
 ///
-///     xcrun simctl launch <udid> com.gxlself.bangs.watch -BangsDemo YES -BangsPage sessions
+///     xcrun simctl launch <udid> com.gxlself.bangs.ios.watchkitapp -BangsDemo YES -BangsPage sessions
 ///
 /// With `-BangsDemo YES` the store never talks to the network and never touches the keychain:
 /// it starts paired, online, and showing the snapshot below. The transport buttons, ticking a

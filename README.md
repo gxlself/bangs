@@ -32,8 +32,8 @@ wants "Run anyway" once.
 - **Apple Watch**: a watch app (`watch/`) for the same glance on the wrist — now playing with lyrics
   and transport controls, the Claude Code / Codex sessions with a tap when one stops working, the
   to-do list and the board. It reaches Bangs over the local network once the tray's Apple Watch
-  submenu opens the port and the watch pairs with the code shown there. See
-  [watch/README.md](watch/README.md) and [docs/watch.md](docs/watch.md).
+  submenu opens the port and the watch pairs with the code shown there. It ships inside the iPhone
+  app. See [watch/README.md](watch/README.md) and [docs/watch.md](docs/watch.md).
 
 - **iPhone & iPad app** (`ios/`): to-dos, the dev panel's Claude Code / Codex status, the clipboard and the
   shelf on your phone, synced through your own iCloud (CloudKit, like Paste) — no server. To-dos go both
@@ -195,7 +195,7 @@ src-tauri/src/
   shelf.rs                 file metadata, open/reveal, drag preview
   tray.rs, settings.rs      tray menu and persisted settings
 site/                      the landing page published to gh-pages
-watch/                     the Apple Watch app (SwiftUI, watchOS 10+), BangsWatch.xcodeproj
+watch/                     the Apple Watch app (SwiftUI, watchOS 10+), a target in ios/project.yml
 scripts/generate-icons.swift  app/tray/drag icons (then `pnpm tauri icon src-tauri/icons/app-icon.png`)
 scripts/version.sh, build-release.sh, publish-site.sh, windows-build.ps1  release plumbing
 ```

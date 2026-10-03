@@ -5,6 +5,7 @@ name: Bangs
 options:
   deploymentTarget:
     iOS: "16.0"
+    watchOS: "10.0"
   createIntermediateGroups: true
 
 # Project-level settings. Bangs.xcconfig (target level, below) is applied on top of these,
@@ -34,6 +35,8 @@ targets:
         product: BangsCloud
       - package: BangsCloud
         product: BangsSyncCore
+      # The Apple Watch app ships inside the iPhone app (Embed Watch Content).
+      - target: BangsWatch
     configFiles:
       Debug: Bangs.xcconfig
       Release: Bangs.xcconfig
@@ -79,6 +82,47 @@ targets:
           - UIInterfaceOrientationLandscapeRight
         ITSAppUsesNonExemptEncryption: false
 
+  # The Apple Watch app (sources in ../watch; its Info.plist is generated from `info:` below,
+  # into watch/Info.plist, git-ignored). It talks to Bangs on the Mac over the local
+  # network, not to this iPhone app, so it runs on its own once installed; see watch/README.md.
+  # Its bundle id has to start with the iPhone app's: change both together.
+  BangsWatch:
+    type: application
+    platform: watchOS
+    deploymentTarget: "10.0"
+    sources:
+      - path: ../watch/BangsWatch
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.gxlself.bangs.ios.watchkitapp
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        TARGETED_DEVICE_FAMILY: "4"
+        SKIP_INSTALL: YES
+    info:
+      path: ../watch/Info.plist
+      properties:
+        CFBundleDisplayName: Bangs
+        CFBundleDevelopmentRegion: en
+        CFBundleLocalizations:
+          - en
+          - zh-Hans
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        WKApplication: true
+        WKCompanionAppBundleIdentifier: com.gxlself.bangs.ios
+        WKRunsIndependentlyOfCompanionApp: true
+        # Bangs answers on the local network over plain HTTP (src-tauri/src/remote.rs);
+        # everything else stays under ATS.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        # The Chinese is in BangsWatch/zh-Hans.lproj/InfoPlist.strings.
+        NSLocalNetworkUsageDescription: Bangs connects to Bangs on your Mac over the local network.
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+        ITSAppUsesNonExemptEncryption: false
+
 schemes:
   Bangs:
     build:
@@ -88,3 +132,9 @@ schemes:
       config: Debug
     archive:
       config: Release
+  BangsWatch:
+    build:
+      targets:
+        BangsWatch: all
+    run:
+      config: Debug

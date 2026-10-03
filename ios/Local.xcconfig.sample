@@ -7,3 +7,5 @@
 // A different bundle id. The App ID must have iCloud (CloudKit) and Push Notifications enabled,
 // and the iCloud container in Bangs/Bangs.entitlements must be one your team owns.
 // PRODUCT_BUNDLE_IDENTIFIER = com.example.bangs.ios
+// The Apple Watch app's bundle id must start with it: change BangsWatch's PRODUCT_BUNDLE_IDENTIFIER
+// and WKCompanionAppBundleIdentifier in project.yml to match.
