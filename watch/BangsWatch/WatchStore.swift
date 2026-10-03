@@ -167,7 +167,8 @@ final class WatchStore: ObservableObject {
             position += max(0, computerNow - media.elapsedAt) / 1000
         }
         if let duration = media.duration, duration > 0 {
-            position = min(position, duration)
+            // The demo's song goes round, however long the screenshots take.
+            position = isDemo ? position.truncatingRemainder(dividingBy: duration) : min(position, duration)
         }
         return position
     }

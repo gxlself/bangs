@@ -36,7 +36,7 @@ enum DemoData {
             host: host,
             now: now,
             media: Media(
-                title: t("夏夜的风", "Summer Night Drive"),
+                title: t("夏夜的风", "Night Drive"),
                 artist: "The Lanterns",
                 album: t("城市灯火", "City Lights"),
                 appName: "Music",
@@ -77,12 +77,12 @@ enum DemoData {
     /// Made up for the demo, line by line, every few seconds of the song.
     static let lyrics: [LyricLine] = {
         let lines: [(String, String)] = [
-            ("Windows down on the empty road", "车窗摇下，路上没有别人"),
-            ("Streetlights counting us back home", "路灯一盏盏数着我们回家"),
-            ("Radio humming a song we know", "收音机哼着我们熟悉的歌"),
+            ("Windows down, empty road", "车窗摇下，路上没有别人"),
+            ("Streetlights count us home", "路灯一盏盏数着我们回家"),
+            ("Radio hums a song we know", "收音机哼着我们熟悉的歌"),
             ("Summer night, take it slow", "夏夜的风，慢一点吹"),
-            ("Every mile is a little glow", "每一里路都亮着一点光"),
-            ("Hold the moment, let it go", "抓住这一刻，再放它走"),
+            ("Every mile a little glow", "每一里路都亮着一点光"),
+            ("Hold it, then let it go", "抓住这一刻，再放它走"),
         ]
         return (0..<36).map { index in
             let (english, chinese) = lines[index % lines.count]

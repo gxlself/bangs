@@ -1,4 +1,5 @@
 import SwiftUI
+import WatchKit
 
 struct NowPlayingView: View {
     @EnvironmentObject private var store: WatchStore
@@ -8,6 +9,14 @@ struct NowPlayingView: View {
             if let media = store.snapshot?.media {
                 TimelineView(.periodic(from: .now, by: 0.5)) { context in
                     player(media, position: store.position(of: media, at: context.date))
+                        // The page keeps a strip clear above the screen's
+                        // rounded bottom, 19 points on a 40 mm watch and 40 on
+                        // an Ultra. The player goes partway into it: lower
+                        // controls on the big watches, room for a lyric line on
+                        // the small ones, and the side buttons still clear of
+                        // the corners. Not while the offline note is there.
+                        .padding(.bottom, reclaimsBottom ? Self.bottomMargin : 0)
+                        .ignoresSafeArea(.container, edges: reclaimsBottom ? .bottom : [])
                 }
             } else if store.snapshot == nil {
                 ProgressView()
@@ -15,11 +24,18 @@ struct NowPlayingView: View {
                 EmptyNote(symbol: "music.note", text: t("没有在播放", "Nothing playing"))
             }
         }
-        .page(t("播放", "Now Playing"), tint: Palette.music)
+        // No title: the track's own name heads the page, and the screen is
+        // small enough without a second one above it.
+        .page(nil, tint: Palette.music)
     }
 
+    private var reclaimsBottom: Bool { store.connection != .offline }
+
+    /// From the bottom of the screen to the bottom of the controls.
+    private static let bottomMargin = (WKInterfaceDevice.current().screenBounds.height * 0.075).rounded()
+
     private func player(_ media: Media, position: Double?) -> some View {
-        VStack(spacing: 4) {
+        VStack(spacing: 6) {
             HStack(spacing: 8) {
                 artwork
                 VStack(alignment: .leading, spacing: 1) {
@@ -41,17 +57,14 @@ struct NowPlayingView: View {
 
             progress(media, position: position)
 
-            HStack {
+            HStack(spacing: 8) {
                 control("backward.fill", action: "previous")
                 control(media.playing ? "pause.fill" : "play.fill", action: "toggle", prominent: true)
                 control("forward.fill", action: "next")
             }
+            // In from the edges, where the screen's corners round off.
+            .padding(.horizontal, 4)
         }
-        // The controls go down into the rounded bottom of the screen, as in
-        // the system's own player, which leaves the lyric room for two lines;
-        // the offline note needs that strip when it shows.
-        .padding(.bottom, store.connection == .offline ? 0 : 4)
-        .ignoresSafeArea(.container, edges: store.connection == .offline ? [] : .bottom)
     }
 
     private var artwork: some View {
@@ -110,17 +123,22 @@ struct NowPlayingView: View {
     @ViewBuilder
     private func progress(_ media: Media, position: Double?) -> some View {
         if let position, let duration = media.duration, duration > 0 {
-            VStack(spacing: 2) {
-                ProgressView(value: min(position / duration, 1))
-                    .tint(Palette.music)
-                HStack {
-                    Text(clock(position))
-                    Spacer()
-                    Text("-" + clock(duration - position))
+            // One row: the times either side of a thin bar.
+            HStack(spacing: 6) {
+                Text(clock(position))
+                GeometryReader { geometry in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(.white.opacity(0.18))
+                        Capsule()
+                            .fill(Palette.music)
+                            .frame(width: geometry.size.width * min(max(position / duration, 0), 1))
+                    }
                 }
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(.secondary)
+                .frame(height: 4)
+                Text("-" + clock(duration - position))
             }
+            .font(.caption2.monospacedDigit())
+            .foregroundStyle(.secondary)
         }
     }
 

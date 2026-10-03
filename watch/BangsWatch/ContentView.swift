@@ -78,19 +78,20 @@ enum Palette {
 
 extension View {
     /// Title, settings button, page tint and the offline note every page shares.
-    func page(_ title: String, tint: Color) -> some View {
+    /// `title` nil leaves the row under the clock to the page itself.
+    func page(_ title: String?, tint: Color) -> some View {
         modifier(PageChrome(title: title, tint: tint))
     }
 }
 
 private struct PageChrome: ViewModifier {
     @EnvironmentObject private var store: WatchStore
-    let title: String
+    let title: String?
     let tint: Color
 
     func body(content: Content) -> some View {
         content
-            .navigationTitle(title)
+            .navigationTitle(title ?? "")
             .containerBackground(tint.gradient.opacity(0.35), for: .tabView)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
