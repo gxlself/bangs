@@ -26,3 +26,7 @@ dist-ssr
 # iCloud sync signing material (see src-tauri/icloud/README.md)
 *.provisionprofile
 *.mobileprovision
+
+# Xcode
+xcuserdata/
+*.xcuserstate

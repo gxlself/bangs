@@ -8,10 +8,7 @@
 //!
 //! See docs/plugins.md for the contract other programs code against.
 
-use std::collections::hash_map::RandomState;
 use std::fs;
-use std::hash::{BuildHasher, Hasher};
-use std::io::{Read, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -21,6 +18,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_opener::OpenerExt;
+
+use crate::http::{self, reply};
 
 /// The directory is cheap to stat, and a plugin that just wrote a file should
 /// not wait for the notch to notice.
@@ -32,7 +31,6 @@ const MAX_FIELD: usize = 200;
 const MAX_BODY: usize = 32 * 1024;
 /// The panel scrolls, but a plugin cannot be allowed to bury everything else.
 const MAX_ACTIVITIES: usize = 12;
-const IO_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// One line on the notch, as a plugin describes it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -218,12 +216,7 @@ fn token(app: &AppHandle) -> Option<String> {
             return Some(existing);
         }
     }
-    let mut token = String::new();
-    for _ in 0..4 {
-        // RandomState seeds itself from the OS, which is the entropy std
-        // exposes without pulling in a crate.
-        token.push_str(&format!("{:016x}", RandomState::new().build_hasher().finish()));
-    }
+    let token = http::random_token();
     fs::write(&path, &token).ok()?;
     #[cfg(unix)]
     {
@@ -248,94 +241,23 @@ fn spawn_api(app: AppHandle) {
     });
 }
 
-struct Request {
-    method: String,
-    path: String,
-    token: Option<String>,
-    /// Browsers set this; command line clients do not.
-    origin: Option<String>,
-    body: String,
-}
-
-fn read_request(stream: &mut TcpStream) -> Option<Request> {
-    let mut buffer = Vec::new();
-    let mut chunk = [0u8; 1024];
-    // Headers first: read until the blank line that ends them.
-    let head_end = loop {
-        if let Some(index) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
-            break index + 4;
-        }
-        let read = stream.read(&mut chunk).ok()?;
-        if read == 0 || buffer.len() + read > MAX_BODY {
-            return None;
-        }
-        buffer.extend_from_slice(&chunk[..read]);
-    };
-    let head = String::from_utf8_lossy(&buffer[..head_end]).to_string();
-    let mut lines = head.lines();
-    let mut start = lines.next()?.split_whitespace();
-    let method = start.next()?.to_string();
-    let path = start.next()?.to_string();
-    let mut token = None;
-    let mut origin = None;
-    let mut length = 0usize;
-    for line in lines {
-        let Some((name, value)) = line.split_once(':') else {
-            continue;
-        };
-        let value = value.trim();
-        match name.to_ascii_lowercase().as_str() {
-            "x-bangs-token" => token = Some(value.to_string()),
-            "origin" => origin = Some(value.to_string()),
-            "content-length" => length = value.parse().unwrap_or(0),
-            _ => {}
-        }
-    }
-    let mut body = buffer[head_end..].to_vec();
-    while body.len() < length.min(MAX_BODY) {
-        let read = stream.read(&mut chunk).ok()?;
-        if read == 0 {
-            break;
-        }
-        body.extend_from_slice(&chunk[..read]);
-    }
-    Some(Request {
-        method,
-        path,
-        token,
-        origin,
-        body: String::from_utf8_lossy(&body).to_string(),
-    })
-}
-
-fn reply(stream: &mut TcpStream, status: &str, body: &str) {
-    let response = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    );
-    let _ = stream.write_all(response.as_bytes());
-    let _ = stream.flush();
-}
-
 fn handle(app: &AppHandle, mut stream: TcpStream) {
-    let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
-    let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
-    let Some(request) = read_request(&mut stream) else {
+    let Some(request) = http::read_request(&mut stream, MAX_BODY) else {
         return reply(&mut stream, "400 Bad Request", r#"{"error":"bad request"}"#);
     };
     // A page in a browser can reach loopback; it cannot read the token file,
     // but it also has no business here at all.
-    if request.origin.is_some() {
+    // Browsers set Origin; command line clients do not.
+    if request.header("origin").is_some() {
         return reply(&mut stream, "403 Forbidden", r#"{"error":"not for browsers"}"#);
     }
-    if token(app).as_deref() != request.token.as_deref() {
+    if token(app).as_deref() != request.header("x-bangs-token") {
         return reply(&mut stream, "401 Unauthorized", r#"{"error":"bad or missing X-Bangs-Token"}"#);
     }
     let Some(directory) = dir(app) else {
         return reply(&mut stream, "500 Internal Server Error", r#"{"error":"no config directory"}"#);
     };
-    let path = request.path.split('?').next().unwrap_or_default().to_string();
-    match (request.method.as_str(), path.as_str()) {
+    match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/activities") => {
             let body = serde_json::to_string(&read_all(app)).unwrap_or_else(|_| "[]".into());
             reply(&mut stream, "200 OK", &body);

@@ -5,8 +5,7 @@ use tauri_plugin_autostart::ManagerExt as _;
 
 use crate::i18n::t;
 use crate::settings::{self, SettingsState};
-use crate::sync;
-use crate::update;
+use crate::{remote, sync, update};
 use crate::{geometry, platform, MAIN_WINDOW};
 
 const TRAY_ID: &str = "bangs-tray";
@@ -60,6 +59,7 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
         )?)?;
     }
 
+    let watch = watch_menu(app)?;
     let visible = CheckMenuItem::with_id(app, "visible", t("显示刘海", "Show the notch"), true, settings.visible, None::<&str>)?;
     let hover = CheckMenuItem::with_id(app, "hover", t("悬停时展开", "Expand on hover"), true, settings.expand_on_hover, None::<&str>)?;
     let idle_handle =
@@ -87,7 +87,7 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     let mut items: Vec<&dyn IsMenuItem<Wry>> = vec![&visible, &hover, &idle_handle];
     #[cfg(windows)]
     items.push(&clipboard_history);
-    items.extend([&lyrics as &dyn IsMenuItem<Wry>, &lyrics_translation, &notify_claude, &display, &language]);
+    items.extend([&lyrics as &dyn IsMenuItem<Wry>, &lyrics_translation, &notify_claude, &display, &language, &watch]);
 
     // Sync with the iPhone, a group of its own: only on a build that can reach
     // iCloud at all, and the status and "Sync now" only while it is on.
@@ -119,6 +119,55 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
 
     items.extend([&separator as &dyn IsMenuItem<Wry>, &autostart, &separator_end, &version, &quit]);
     Menu::with_items(app, &items)
+}
+
+/// Switching the watch on, and what to type into it: the address and the
+/// one-time pairing code, read straight off the menu.
+fn watch_menu(app: &AppHandle) -> tauri::Result<Submenu<Wry>> {
+    let status = remote::status(app);
+    let watch = Submenu::with_id(app, "watch", "Apple Watch", true)?;
+    watch.append(&CheckMenuItem::with_id(
+        app,
+        "watch-enabled",
+        t("允许手表连接", "Allow the watch to connect"),
+        true,
+        status.enabled,
+        None::<&str>,
+    )?)?;
+    if status.enabled {
+        let lines = match (&status.error, &status.address) {
+            (Some(_), _) => vec![format!("{}{}", t("端口被占用：", "Port in use: "), remote::PORT)],
+            (None, address) => vec![
+                format!(
+                    "{}{}",
+                    t("地址：", "Address: "),
+                    address.as_deref().unwrap_or(t("没有联网", "not on a network"))
+                ),
+                format!(
+                    "{}{}",
+                    t("配对码：", "Pairing code: "),
+                    status.code.as_deref().unwrap_or("—")
+                ),
+            ],
+        };
+        watch.append(&PredefinedMenuItem::separator(app)?)?;
+        for line in lines {
+            watch.append(&MenuItem::new(app, line, false, None::<&str>)?)?;
+        }
+    }
+    watch.append(&PredefinedMenuItem::separator(app)?)?;
+    let forget = if status.devices > 0 {
+        let count = status.devices;
+        if crate::i18n::chinese() {
+            format!("忘掉已配对的手表（{count}）")
+        } else {
+            format!("Forget paired watches ({count})")
+        }
+    } else {
+        t("还没有配对的手表", "No watch paired yet").to_string()
+    };
+    watch.append(&MenuItem::with_id(app, "watch-forget", forget, status.devices > 0, None::<&str>)?)?;
+    Ok(watch)
 }
 
 pub fn create(app: &AppHandle) -> tauri::Result<()> {
@@ -204,6 +253,11 @@ fn handle_menu(app: &AppHandle, id: &str) {
                 settings.notify_claude_idle = !settings.notify_claude_idle;
             });
         }
+        "watch-enabled" => {
+            let (_, next) = settings::update(app, |settings| settings.watch_enabled = !settings.watch_enabled);
+            remote::set_enabled(app, next.watch_enabled);
+        }
+        "watch-forget" => remote::forget_all(app),
         "idle-handle" => {
             settings::update(app, |settings| settings.idle_handle = !settings.idle_handle);
         }

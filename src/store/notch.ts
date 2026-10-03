@@ -124,6 +124,7 @@ export const useNotch = create<NotchStore>((set, get) => {
       display: null,
       language: null,
       tabOrder: [],
+      watchEnabled: false,
     },
     dragIcon: null,
     mode: "compact",

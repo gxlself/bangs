@@ -25,6 +25,8 @@ export interface Settings {
   language: string | null;
   /** Tab ids in the order the user dragged them into; empty keeps the default. */
   tabOrder: string[];
+  /** The Apple Watch port is open; the tray owns this switch (remote.rs). */
+  watchEnabled: boolean;
 }
 
 export interface MediaState {

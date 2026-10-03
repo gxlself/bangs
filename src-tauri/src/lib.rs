@@ -2,10 +2,12 @@ mod activities;
 mod clipboard;
 mod dev;
 mod geometry;
+mod http;
 mod i18n;
 mod lyrics;
 mod media;
 mod platform;
+mod remote;
 mod settings;
 mod shelf;
 mod sync;
@@ -21,6 +23,7 @@ use dev::{DevHub, DevState};
 use geometry::{Geometry, ScreenInfo};
 use lyrics::{Lyrics, LyricsHub};
 use media::{MediaCommand, MediaHub, MediaState};
+use remote::RemoteHub;
 use clipboard::{ClipboardHub, ClipboardState};
 use settings::{Settings, SettingsState};
 use todos::{Todo, TodoHub};
@@ -131,6 +134,7 @@ pub fn run() {
             app.manage(TodoHub::default());
             app.manage(sync::SyncHub::default());
             app.manage(UpdateState::default());
+            app.manage(RemoteHub::default());
 
             platform::prepare_window(&handle)?;
             geometry::place_window(&handle);
@@ -143,6 +147,7 @@ pub fn run() {
             activities::start(handle.clone());
             todos::start(handle.clone());
             sync::start(handle.clone());
+            remote::start(handle.clone());
             tray::create(&handle)?;
             update::start(handle.clone());
             Ok(())

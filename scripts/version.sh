@@ -39,6 +39,8 @@ node -e '
 perl -0pi -e 's/^(\[package\](?:.|\n)*?\nversion = ")[^"]+(")/${1}'"$next"'${2}/m' src-tauri/Cargo.toml
 # Cargo.lock repeats it; patching the entry keeps this script offline and quick.
 perl -0pi -e 's/(\[\[package\]\]\nname = "bangs"\nversion = ")[^"]+(")/${1}'"$next"'${2}/' src-tauri/Cargo.lock
+# The watch app carries the same version, in both of its configurations.
+perl -pi -e 's/(MARKETING_VERSION = )[^;]+;/${1}'"$next"';/' watch/BangsWatch.xcodeproj/project.pbxproj
 
 echo "版本已设为 v$(current)"
-echo "改动的文件：package.json  src-tauri/tauri.conf.json  src-tauri/Cargo.toml  src-tauri/Cargo.lock"
+echo "改动的文件：package.json  src-tauri/tauri.conf.json  src-tauri/Cargo.toml  src-tauri/Cargo.lock  watch/BangsWatch.xcodeproj/project.pbxproj"
