@@ -6,6 +6,7 @@ use tauri_plugin_autostart::ManagerExt as _;
 use crate::i18n::t;
 use crate::settings::{self, SettingsState};
 use crate::update;
+use crate::watch::{self, WatchHub};
 use crate::{geometry, platform, MAIN_WINDOW};
 
 const TRAY_ID: &str = "bangs-tray";
@@ -57,6 +58,8 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
         )?)?;
     }
 
+    let watch = watch_menu(app, settings.watch_enabled)?;
+
     Menu::with_items(
         app,
         &[
@@ -68,6 +71,7 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
             &CheckMenuItem::with_id(app, "lyrics", t("显示歌词", "Show lyrics"), true, settings.lyrics_enabled, None::<&str>)?,
             &CheckMenuItem::with_id(app, "lyrics-translation", t("显示歌词翻译", "Show lyric translations"), settings.lyrics_enabled, settings.lyrics_translation_enabled, None::<&str>)?,
             &CheckMenuItem::with_id(app, "notify-claude", t("Claude 忙完时提醒", "Alert when Claude finishes"), true, settings.notify_claude_idle, None::<&str>)?,
+            &watch,
             &display,
             &language,
             &PredefinedMenuItem::separator(app)?,
@@ -77,6 +81,42 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
             &MenuItem::with_id(app, "quit", t("退出", "Quit"), true, None::<&str>)?,
         ],
     )
+}
+
+/// The switch for the watch API and, while it is on, what the watch needs to
+/// pair: this machine's address and the current code.
+fn watch_menu(app: &AppHandle, enabled: bool) -> tauri::Result<Submenu<Wry>> {
+    let hub = app.state::<WatchHub>();
+    let menu = Submenu::with_id(app, "watch", t("手表", "Watch"), true)?;
+    menu.append(&CheckMenuItem::with_id(
+        app,
+        "watch-enabled",
+        t("允许手表连接", "Allow the watch to connect"),
+        true,
+        enabled,
+        None::<&str>,
+    )?)?;
+    if !enabled {
+        return Ok(menu);
+    }
+    let address = match watch::lan_address() {
+        Some(ip) => format!("{}{ip}", t("地址：", "Address: ")),
+        None => t("没有连上局域网", "Not on a local network").to_string(),
+    };
+    let code = format!("{}{}", t("配对码：", "Pairing code: "), hub.code());
+    let paired = hub.paired();
+    menu.append(&PredefinedMenuItem::separator(app)?)?;
+    menu.append(&MenuItem::with_id(app, "watch-address", address, false, None::<&str>)?)?;
+    menu.append(&MenuItem::with_id(app, "watch-code", code, false, None::<&str>)?)?;
+    menu.append(&MenuItem::with_id(app, "watch-new-code", t("换一个配对码", "New pairing code"), true, None::<&str>)?)?;
+    menu.append(&MenuItem::with_id(
+        app,
+        "watch-unpair",
+        format!("{} ({paired})", t("取消所有手表配对", "Unpair all watches")),
+        paired > 0,
+        None::<&str>,
+    )?)?;
+    Ok(menu)
 }
 
 pub fn create(app: &AppHandle) -> tauri::Result<()> {
@@ -151,6 +191,13 @@ fn handle_menu(app: &AppHandle, id: &str) {
                 settings.notify_claude_idle = !settings.notify_claude_idle;
             });
         }
+        "watch-enabled" => {
+            let (_, next) = settings::update(app, |settings| settings.watch_enabled = !settings.watch_enabled);
+            watch::set_enabled(app, next.watch_enabled);
+        }
+        "watch-new-code" => app.state::<WatchHub>().renew_code(),
+        "watch-unpair" => watch::unpair_all(app),
+        "watch-address" | "watch-code" => {}
         "idle-handle" => {
             settings::update(app, |settings| settings.idle_handle = !settings.idle_handle);
         }

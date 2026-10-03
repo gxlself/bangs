@@ -2,6 +2,7 @@ mod activities;
 mod clipboard;
 mod dev;
 mod geometry;
+mod http;
 mod i18n;
 mod lyrics;
 mod media;
@@ -11,6 +12,7 @@ mod shelf;
 mod todos;
 mod tray;
 mod update;
+mod watch;
 
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
@@ -24,6 +26,7 @@ use clipboard::{ClipboardHub, ClipboardState};
 use settings::{Settings, SettingsState};
 use todos::{Todo, TodoHub};
 use update::UpdateState;
+use watch::WatchHub;
 
 pub const MAIN_WINDOW: &str = "main";
 
@@ -129,6 +132,7 @@ pub fn run() {
             app.manage(ActivityHub::default());
             app.manage(TodoHub::default());
             app.manage(UpdateState::default());
+            app.manage(WatchHub::default());
 
             platform::prepare_window(&handle)?;
             geometry::place_window(&handle);
@@ -140,6 +144,7 @@ pub fn run() {
             clipboard::start(handle.clone());
             activities::start(handle.clone());
             todos::start(handle.clone());
+            watch::start(handle.clone());
             tray::create(&handle)?;
             update::start(handle.clone());
             Ok(())
