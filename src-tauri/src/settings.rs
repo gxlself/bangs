@@ -30,6 +30,9 @@ pub struct Settings {
     /// webview does not know are ignored, and tabs missing here keep their
     /// default place after the ones that are listed.
     pub tab_order: Vec<String>,
+    /// Let the Apple Watch app reach Bangs over the local network; see
+    /// remote.rs. Off until someone asks for it, because it opens a port.
+    pub watch_enabled: bool,
 }
 
 impl Default for Settings {
@@ -48,6 +51,7 @@ impl Default for Settings {
             display: None,
             language: None,
             tab_order: Vec::new(),
+            watch_enabled: false,
         }
     }
 }
@@ -131,5 +135,11 @@ mod tests {
     fn old_settings_enable_lyric_translations_by_default() {
         let settings: Settings = serde_json::from_str(r#"{"lyricsEnabled":true}"#).unwrap();
         assert!(settings.lyrics_translation_enabled);
+    }
+
+    #[test]
+    fn old_settings_keep_the_watch_port_closed() {
+        let settings: Settings = serde_json::from_str(r#"{"lyricsEnabled":true}"#).unwrap();
+        assert!(!settings.watch_enabled);
     }
 }

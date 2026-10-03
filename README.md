@@ -28,6 +28,11 @@ wants "Run anyway" once.
 - **Board**: anything else on the machine can dock a row — a title, a subtitle, a progress bar and
   at most a link — by writing a JSON file, or by posting to a loopback endpoint. The newest row
   shows beside the collapsed notch. See [docs/plugins.md](docs/plugins.md).
+- **Apple Watch**: a watch app (`watch/`) for the same glance on the wrist — now playing with lyrics
+  and transport controls, the Claude Code / Codex sessions with a tap when one stops working, the
+  to-do list and the board. It reaches Bangs over the local network once the tray's Apple Watch
+  submenu opens the port and the watch pairs with the code shown there. See
+  [watch/README.md](watch/README.md) and [docs/watch.md](docs/watch.md).
 
 Screens with a hardware notch get wings around it; other screens get a virtual notch, which shrinks
 to a thin bar when nothing is happening (the tray menu can turn that off). Full-screen video, games
@@ -47,8 +52,8 @@ pnpm tauri build          # .app/.dmg on macOS, .msi/.exe on Windows
 Build each platform on that platform (Windows installers cannot be produced on macOS).
 
 The tray menu — the menu bar icon on macOS, the notification area icon on Windows — controls
-show/hide, expand on hover, idle bar, lyrics, lyric translations, Claude alerts, display, language
-and launch at login.
+show/hide, expand on hover, idle bar, lyrics, lyric translations, Claude alerts, display, language,
+the Apple Watch connection and launch at login.
 
 Bangs speaks Chinese and English, following the system language unless the Language submenu pins it
 to one (`src-tauri/src/i18n.rs`, `src/lib/i18n.ts`). WKWebView reports the app's own language rather
@@ -150,9 +155,12 @@ src-tauri/src/
   clipboard/mac.rs         read-only Paste store, copy and panel hand-off
   clipboard/win.rs         Bangs' own clipboard history
   todos.rs                 the to-do list, saved in <config>/todos.json
+  remote.rs                the Apple Watch API on the local network, pairing and paired watches
+  http.rs                  the bit of HTTP both local APIs share
   shelf.rs                 file metadata, open/reveal, drag preview
   tray.rs, settings.rs      tray menu and persisted settings
 site/                      the landing page published to gh-pages
+watch/                     the Apple Watch app (SwiftUI, watchOS 10+), BangsWatch.xcodeproj
 scripts/generate-icons.swift  app/tray/drag icons (then `pnpm tauri icon src-tauri/icons/app-icon.png`)
 scripts/version.sh, build-release.sh, publish-site.sh, windows-build.ps1  release plumbing
 ```

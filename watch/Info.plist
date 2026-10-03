@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Bangs answers on the local network over plain HTTP (see
+       src-tauri/src/remote.rs); everything else stays under ATS. -->
+  <key>NSAppTransportSecurity</key>
+  <dict>
+    <key>NSAllowsLocalNetworking</key>
+    <true/>
+  </dict>
+  <!-- Asked for once, where watchOS asks at all, before the first request
+       reaches the computer. -->
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>用来连接同一网络里 Mac 上的 Bangs。</string>
+</dict>
+</plist>
