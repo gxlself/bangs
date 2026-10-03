@@ -7,9 +7,12 @@ use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hasher};
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const IO_TIMEOUT: Duration = Duration::from_secs(3);
+/// All the time one request gets, so a client trickling a byte at a time
+/// cannot hold a connection (and its thread) open for long.
+const REQUEST_DEADLINE: Duration = Duration::from_secs(10);
 
 pub struct Request {
     pub method: String,
@@ -33,6 +36,7 @@ impl Request {
 pub fn read_request(stream: &mut TcpStream, max: usize) -> Option<Request> {
     let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
     let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
+    let deadline = Instant::now() + REQUEST_DEADLINE;
     let mut buffer = Vec::new();
     let mut chunk = [0u8; 1024];
     // Headers first: read until the blank line that ends them.
@@ -41,7 +45,7 @@ pub fn read_request(stream: &mut TcpStream, max: usize) -> Option<Request> {
             break index + 4;
         }
         let read = stream.read(&mut chunk).ok()?;
-        if read == 0 || buffer.len() + read > max {
+        if read == 0 || buffer.len() + read > max || Instant::now() > deadline {
             return None;
         }
         buffer.extend_from_slice(&chunk[..read]);
@@ -68,7 +72,7 @@ pub fn read_request(stream: &mut TcpStream, max: usize) -> Option<Request> {
     let mut body = buffer[head_end..].to_vec();
     while body.len() < length.min(max) {
         let read = stream.read(&mut chunk).ok()?;
-        if read == 0 {
+        if read == 0 || Instant::now() > deadline {
             break;
         }
         body.extend_from_slice(&chunk[..read]);

@@ -6,7 +6,7 @@ struct SessionsView: View {
 
     var body: some View {
         Group {
-            if let sessions = store.snapshot?.sessions, !sessions.isEmpty {
+            if let sessions = shown, !sessions.isEmpty {
                 List(sessions) { session in
                     SessionRow(session: session)
                 }
@@ -18,6 +18,17 @@ struct SessionsView: View {
         }
         .page(t("会话", "Sessions"), tint: Palette.focus)
     }
+
+    /// Every session that is doing something and the few idle ones that did
+    /// last, so the to-do page is not a long scroll away.
+    private var shown: [Session]? {
+        guard let sessions = store.snapshot?.sessions else { return nil }
+        let active = sessions.filter { $0.status == "busy" || $0.status == "waiting" }
+        let idle = sessions.filter { $0.status != "busy" && $0.status != "waiting" }
+        return active + idle.prefix(max(0, Self.limit - active.count))
+    }
+
+    private static let limit = 5
 }
 
 private struct SessionRow: View {
@@ -82,12 +93,19 @@ private struct StatusDot: View {
         Circle()
             .fill(Self.color(status))
             .frame(width: 8, height: 8)
-            .opacity(dim && status != "idle" ? 0.35 : 1)
-            .onAppear {
-                guard status != "idle" else { return }
-                withAnimation(.easeInOut(duration: 0.7).repeatForever(autoreverses: true)) {
-                    dim = true
-                }
-            }
+            .opacity(dim ? 0.35 : 1)
+            .onAppear(perform: pulse)
+            .onChange(of: status) { _, _ in pulse() }
+    }
+
+    private func pulse() {
+        guard status == "busy" || status == "waiting" else {
+            withAnimation(.default) { dim = false }
+            return
+        }
+        guard !dim else { return }
+        withAnimation(.easeInOut(duration: 0.7).repeatForever(autoreverses: true)) {
+            dim = true
+        }
     }
 }

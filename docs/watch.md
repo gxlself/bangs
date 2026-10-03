@@ -19,7 +19,8 @@ gets back in its keychain and does not need the code again.
 
 The code is good for one pairing: once a watch pairs, the menu shows a new one.
 Five wrong codes in a row replace it too, and after any wrong code nobody gets
-another guess for two seconds. **忘掉已配对的手表 / Forget paired watches** in
+another guess for two seconds — four after the next five, then eight, up to ten
+minutes, until a watch pairs or the switch is turned off and on again. **忘掉已配对的手表 / Forget paired watches** in
 the same submenu unpairs every watch; unpairing on the watch drops its own.
 Paired watches are kept in `watch-devices.json`, next to `settings.json`.
 
@@ -49,8 +50,8 @@ page — is refused outright, as on the loopback API.
 | `GET` | `/v1/artwork` | The current album art as the image itself, `404` when there is none. |
 | `GET` | `/v1/lyrics` | `{"lines":[{"at":12.3,"text":"…","translation":"…"}]}` for the track playing now; empty when the lines have no timestamps or belong to another track. |
 | `POST` | `/v1/media` | `{"action":"toggle"}`, `"next"`, `"previous"`, or `{"action":"seek","position":42}`. |
-| `POST` | `/v1/todos` | `{"text":"…"}` adds a line at the top. |
-| `DELETE` | `/v1/todos/<id>` | Ticks a line off — it is gone, as on the notch. |
+| `POST` | `/v1/todos` | `{"text":"…"}` adds a line at the top; `409` when the list already has as many open lines as it takes. |
+| `POST` | `/v1/todos/<id>/done` | Ticks a line off, as a tap on the notch does. It stays done there (and on the iPhone) until cleared, and leaves `todos` in `/v1/state`. Ticking a line that is already done changes nothing. |
 
 `/v1/state`:
 
@@ -82,6 +83,9 @@ page — is refused outright, as on the loopback API.
   difference.
 - `artwork` and `lyrics` are fingerprints, not content. Fetch `/v1/artwork` or
   `/v1/lyrics` when one changes; both are `null` when there is nothing to fetch.
+- `todos` holds the open lines only, newest first.
+- A session's `id` is a fingerprint of the one Bangs keeps, which for Codex is
+  a file path; it is stable for as long as the session lives.
 - `status` is `busy`, `waiting` or `idle`; `agent` is `claude` or `codex`.
   Clients should treat values they do not know as `idle` and show the raw
   agent name, so a newer Bangs does not break an older watch.

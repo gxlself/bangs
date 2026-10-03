@@ -42,14 +42,18 @@ const MAX_BODY: usize = 8 * 1024;
 /// Wrong codes before the code shown in the tray is replaced.
 const MAX_FAILURES: u32 = 5;
 /// After a wrong code nobody gets another guess for this long, which keeps a
-/// six-digit code out of reach of anything that tries them all.
+/// six-digit code out of reach of anything that tries them all. The wait
+/// doubles each time a run of wrong codes replaces the code, up to
+/// `MAX_COOLDOWN`, until a watch pairs or the switch is flipped; someone who
+/// fumbled their own code just turns the switch off and on.
 const FAILURE_COOLDOWN: Duration = Duration::from_secs(2);
+const MAX_COOLDOWN: Duration = Duration::from_secs(10 * 60);
 /// More watches than anyone wears; the oldest one is forgotten first.
 const MAX_DEVICES: usize = 8;
 const MAX_NAME: usize = 60;
-/// How often an idle listener checks whether it has been switched off.
-const ACCEPT_IDLE: Duration = Duration::from_millis(200);
-/// A listener being replaced can hold the port for one more idle tick.
+/// How long to wait between tries for a port the listener being replaced
+/// has not let go of yet, and for how long to keep trying.
+const BIND_PAUSE: Duration = Duration::from_millis(100);
 const BIND_RETRY: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,6 +73,8 @@ struct Inner {
     /// Shown in the tray while the port is open; good for one pairing.
     code: Option<String>,
     failures: u32,
+    /// Codes replaced for wrong guesses since the last pairing or switch.
+    strikes: u32,
     last_failure: Option<Instant>,
     devices: Vec<Device>,
     /// Why the port could not be opened, for the tray.
@@ -145,9 +151,14 @@ pub fn set_enabled(app: &AppHandle, enabled: bool) {
         inner.generation += 1;
         inner.code = enabled.then(new_code);
         inner.failures = 0;
+        inner.strikes = 0;
+        inner.last_failure = None;
         inner.error = None;
         inner.generation
     };
+    // The listener the switch just retired is blocked in accept; one
+    // connection wakes it to find it is no longer current and close the port.
+    let _ = TcpStream::connect_timeout(&(Ipv4Addr::LOCALHOST, PORT).into(), Duration::from_millis(300));
     if enabled {
         let app = app.clone();
         thread::spawn(move || listen(app, generation));
@@ -158,6 +169,11 @@ pub fn set_enabled(app: &AppHandle, enabled: bool) {
 pub fn forget_all(app: &AppHandle) {
     app.state::<RemoteHub>().0.lock().unwrap().devices.clear();
     save(app, &[]);
+}
+
+/// How long after a wrong code the next guess has to wait.
+fn cooldown(strikes: u32) -> Duration {
+    FAILURE_COOLDOWN.saturating_mul(1 << strikes.min(16)).min(MAX_COOLDOWN)
 }
 
 fn new_code() -> String {
@@ -173,7 +189,7 @@ fn listen(app: AppHandle, generation: u64) {
     let listener = loop {
         match TcpListener::bind((Ipv4Addr::UNSPECIFIED, PORT)) {
             Ok(listener) => break listener,
-            Err(_) if Instant::now() < deadline && is_current(&app, generation) => thread::sleep(ACCEPT_IDLE),
+            Err(_) if Instant::now() < deadline && is_current(&app, generation) => thread::sleep(BIND_PAUSE),
             Err(error) => {
                 eprintln!("[remote] cannot open port {PORT}: {error}");
                 let hub = app.state::<RemoteHub>();
@@ -187,21 +203,20 @@ fn listen(app: AppHandle, generation: u64) {
             }
         }
     };
-    // Non-blocking, so switching the watch off closes the port within a tick
-    // instead of on the next connection.
-    if listener.set_nonblocking(true).is_err() {
-        return;
-    }
-    while is_current(&app, generation) {
-        match listener.accept() {
-            Ok((stream, _)) => {
-                // Accepted sockets inherit non-blocking mode on macOS.
-                let _ = stream.set_nonblocking(false);
+    // Blocking, so a request is answered the moment it arrives; set_enabled
+    // wakes a retired listener with a connection of its own.
+    for stream in listener.incoming() {
+        if !is_current(&app, generation) {
+            break;
+        }
+        match stream {
+            Ok(stream) => {
                 let app = app.clone();
                 thread::spawn(move || handle(&app, stream));
             }
-            Err(error) if error.kind() == ErrorKind::WouldBlock => thread::sleep(ACCEPT_IDLE),
-            Err(_) => thread::sleep(ACCEPT_IDLE),
+            Err(error) if error.kind() == ErrorKind::Interrupted => {}
+            // Out of file descriptors and the like: give it a moment.
+            Err(_) => thread::sleep(BIND_PAUSE),
         }
     }
 }
@@ -262,11 +277,16 @@ fn handle(app: &AppHandle, mut stream: TcpStream) {
             let Ok(todo) = serde_json::from_str::<NewTodo>(&request.body) else {
                 return http::error(&mut stream, "400 Bad Request", "body needs a text");
             };
+            // The notch says so instead of taking another; so does the watch.
+            if todos::is_full(app) {
+                return http::error(&mut stream, "409 Conflict", "the list is full");
+            }
             todos::todo_add(app.clone(), todo.text);
             reply(&mut stream, "200 OK", r#"{"ok":true}"#);
         }
-        ("DELETE", path) if path.starts_with("/v1/todos/") => {
-            todos::todo_remove(app.clone(), path.trim_start_matches("/v1/todos/").to_string());
+        // Ticked off, as on the notch: done, and off the watch's list.
+        ("POST", path) if done_todo(path).is_some() => {
+            todos::todo_done(app, done_todo(path).unwrap_or_default());
             reply(&mut stream, "200 OK", r#"{"ok":true}"#);
         }
         // The watch signing itself out.
@@ -283,6 +303,11 @@ fn handle(app: &AppHandle, mut stream: TcpStream) {
         }
         _ => http::error(&mut stream, "404 Not Found", "unknown endpoint"),
     }
+}
+
+/// The id in `/v1/todos/<id>/done`.
+fn done_todo(path: &str) -> Option<&str> {
+    path.strip_prefix("/v1/todos/")?.strip_suffix("/done").filter(|id| !id.is_empty() && !id.contains('/'))
 }
 
 /// The bearer token, when it belongs to a paired watch.
@@ -321,7 +346,7 @@ fn pair(app: &AppHandle, stream: &mut TcpStream, body: &str) {
         let mut inner = hub.0.lock().unwrap();
         match inner.code.clone() {
             None => Outcome::Off,
-            Some(_) if inner.last_failure.is_some_and(|at| at.elapsed() < FAILURE_COOLDOWN) => Outcome::TooSoon,
+            Some(_) if inner.last_failure.is_some_and(|at| at.elapsed() < cooldown(inner.strikes)) => Outcome::TooSoon,
             Some(code) if !http::same_secret(&code, &attempt) => {
                 inner.failures += 1;
                 inner.last_failure = Some(Instant::now());
@@ -329,6 +354,7 @@ fn pair(app: &AppHandle, stream: &mut TcpStream, body: &str) {
                 if replaced {
                     inner.code = Some(new_code());
                     inner.failures = 0;
+                    inner.strikes += 1;
                 }
                 Outcome::Wrong { replaced }
             }
@@ -347,6 +373,8 @@ fn pair(app: &AppHandle, stream: &mut TcpStream, body: &str) {
                 // gets a code that no longer works.
                 inner.code = Some(new_code());
                 inner.failures = 0;
+                inner.strikes = 0;
+                inner.last_failure = None;
                 Outcome::Paired { token, devices: inner.devices.clone() }
             }
         }
@@ -380,6 +408,7 @@ struct Snapshot {
     now: f64,
     media: Option<RemoteMedia>,
     sessions: Vec<RemoteSession>,
+    /// The open lines; what is done stays on the notch until it is cleared.
     todos: Vec<Todo>,
     activities: Vec<RemoteActivity>,
 }
@@ -401,7 +430,8 @@ struct RemoteMedia {
     lyrics: Option<String>,
 }
 
-/// A session without its path: the project name is enough on a wrist.
+/// A session without its path: the project name is enough on a wrist, and
+/// the id is a fingerprint, since a Codex session's id is its file's path.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RemoteSession {
@@ -463,7 +493,7 @@ fn snapshot(app: &AppHandle) -> Snapshot {
         .sessions
         .into_iter()
         .map(|session| RemoteSession {
-            id: session.id,
+            id: fingerprint(&session.id),
             agent: session.agent,
             name: session.name,
             project: session.project,
@@ -490,7 +520,7 @@ fn snapshot(app: &AppHandle) -> Snapshot {
         now: now_ms() as f64,
         media,
         sessions,
-        todos: app.state::<TodoHub>().current(),
+        todos: app.state::<TodoHub>().current().into_iter().filter(|todo| !todo.done).collect(),
         activities,
     }
 }
@@ -587,6 +617,24 @@ mod tests {
         assert_eq!(bytes, vec![0x89, b'P', b'N', b'G']);
         assert!(decode_data_url("data:text/html;base64,PGI+").is_none());
         assert!(decode_data_url("https://example.com/a.png").is_none());
+    }
+
+    #[test]
+    fn the_wait_after_wrong_codes_grows_and_stops_growing() {
+        assert_eq!(cooldown(0), FAILURE_COOLDOWN);
+        assert_eq!(cooldown(1), FAILURE_COOLDOWN * 2);
+        assert_eq!(cooldown(3), FAILURE_COOLDOWN * 8);
+        assert_eq!(cooldown(9), MAX_COOLDOWN);
+        assert_eq!(cooldown(u32::MAX), MAX_COOLDOWN);
+    }
+
+    #[test]
+    fn done_paths_name_one_todo() {
+        assert_eq!(done_todo("/v1/todos/18f-2/done"), Some("18f-2"));
+        assert_eq!(done_todo("/v1/todos/done"), None);
+        assert_eq!(done_todo("/v1/todos//done"), None);
+        assert_eq!(done_todo("/v1/todos/a/b/done"), None);
+        assert_eq!(done_todo("/v1/todos/a"), None);
     }
 
     #[test]

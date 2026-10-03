@@ -10,8 +10,15 @@
     <true/>
   </dict>
   <!-- Asked for once, where watchOS asks at all, before the first request
-       reaches the computer. -->
+       reaches the computer. The Chinese is in zh-Hans.lproj/InfoPlist.strings. -->
   <key>NSLocalNetworkUsageDescription</key>
-  <string>用来连接同一网络里 Mac 上的 Bangs。</string>
+  <string>Bangs connects to Bangs on your Mac over the local network.</string>
+  <!-- The app speaks Chinese and English (Text.swift); saying so here makes
+       the system's own words follow. -->
+  <key>CFBundleLocalizations</key>
+  <array>
+    <string>en</string>
+    <string>zh-Hans</string>
+  </array>
 </dict>
 </plist>

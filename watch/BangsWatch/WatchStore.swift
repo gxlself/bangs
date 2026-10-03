@@ -25,7 +25,7 @@ final class WatchStore: ObservableObject {
     @Published private(set) var lyrics: [LyricLine] = []
     /// A session that just finished, shown for a few seconds on any page.
     @Published private(set) var banner: String?
-    /// Ticked off on the watch and not yet gone from the computer's list.
+    /// Ticked off on the watch and still open in the last snapshot.
     @Published private(set) var removing: Set<String> = []
 
     /// The computer's clock minus the watch's, in milliseconds, so playback
@@ -41,9 +41,28 @@ final class WatchStore: ObservableObject {
     private static let interval: Duration = .seconds(2)
 
     init() {
+        #if DEBUG
+        if DemoData.isOn {
+            endpoint = DemoData.endpoint
+            snapshot = DemoData.snapshot()
+            connection = .online
+            lyrics = DemoData.lyrics
+            artwork = DemoData.artwork()
+            return
+        }
+        #endif
         if let data = Keychain.load(Self.endpointKey) {
             endpoint = try? JSONDecoder().decode(Endpoint.self, from: data)
         }
+    }
+
+    /// The screenshot demo: nothing goes over the network, edits stay here.
+    private var isDemo: Bool {
+        #if DEBUG
+        return DemoData.isOn
+        #else
+        return false
+        #endif
     }
 
     private var client: BangsClient? {
@@ -57,7 +76,7 @@ final class WatchStore: ObservableObject {
     // MARK: - Polling
 
     func resume() {
-        guard endpoint != nil, poller == nil else { return }
+        guard endpoint != nil, poller == nil, !isDemo else { return }
         poller = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.refresh()
@@ -171,7 +190,16 @@ final class WatchStore: ObservableObject {
     }
 
     func media(_ action: String) {
-        guard let client else { return }
+        if isDemo, action == "toggle", var media = snapshot?.media {
+            let now = Date().timeIntervalSince1970 * 1000
+            media.elapsed = position(of: media, at: Date())
+            media.elapsedAt = now
+            media.playing.toggle()
+            snapshot?.media = media
+            snapshot?.now = now
+            return
+        }
+        guard let client, !isDemo else { return }
         WKInterfaceDevice.current().play(.click)
         Task {
             do {
@@ -189,24 +217,33 @@ final class WatchStore: ObservableObject {
 
     func addTodo(_ text: String) {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if isDemo, !text.isEmpty {
+            snapshot?.todos.insert(Todo(id: UUID().uuidString, text: text, createdAt: Date().timeIntervalSince1970 * 1000), at: 0)
+            return
+        }
         guard let client, !text.isEmpty else { return }
         Task {
             do {
                 try await client.addTodo(text)
             } catch {
                 WKInterfaceDevice.current().play(.failure)
+                show(error.localizedDescription)
             }
             await refresh()
         }
     }
 
     func complete(_ todo: Todo) {
+        if isDemo {
+            snapshot?.todos.removeAll { $0.id == todo.id }
+            return
+        }
         guard let client else { return }
         WKInterfaceDevice.current().play(.success)
         removing.insert(todo.id)
         Task {
             do {
-                try await client.removeTodo(todo.id)
+                try await client.completeTodo(todo.id)
             } catch {
                 removing.remove(todo.id)
                 WKInterfaceDevice.current().play(.failure)

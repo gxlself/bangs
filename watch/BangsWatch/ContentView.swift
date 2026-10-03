@@ -28,14 +28,15 @@ struct ContentView: View {
 /// One page per panel, paged with the Digital Crown.
 struct MainView: View {
     @EnvironmentObject private var store: WatchStore
+    @State private var page = MainView.initialPage
 
     var body: some View {
         NavigationStack {
-            TabView {
-                NowPlayingView()
-                SessionsView()
-                TodosView()
-                BoardView()
+            TabView(selection: $page) {
+                NowPlayingView().tag(0)
+                SessionsView().tag(1)
+                TodosView().tag(2)
+                BoardView().tag(3)
             }
             .tabViewStyle(.verticalPage)
         }
@@ -54,6 +55,16 @@ struct MainView: View {
             }
         }
         .animation(.spring(duration: 0.35), value: store.banner)
+    }
+}
+
+extension MainView {
+    static var initialPage: Int {
+        #if DEBUG
+        return DemoData.initialPage
+        #else
+        return 0
+        #endif
     }
 }
 

@@ -5,6 +5,8 @@ enum ClientError: LocalizedError {
     /// The computer does not know this watch (or the pairing code was wrong).
     case unauthorized(String)
     case tooSoon
+    /// The computer's to-do list has as many open lines as it takes.
+    case full
     case notBangs
     case server(String)
     case unreachable
@@ -16,7 +18,9 @@ enum ClientError: LocalizedError {
         case .unauthorized:
             return t("配对码不对", "Wrong pairing code")
         case .tooSoon:
-            return t("太快了，等两秒再试", "Too fast — wait a moment and try again")
+            return t("太快了，等一会儿再试", "Too fast — wait a moment and try again")
+        case .full:
+            return t("待办满了，先做完几条", "The to-do list is full")
         case .notBangs:
             return t("那个地址上不是 Bangs", "That address isn't Bangs")
         case .server(let message):
@@ -121,9 +125,10 @@ struct BangsClient {
         _ = try await send("POST", "/v1/todos", body: ["text": text])
     }
 
-    func removeTodo(_ id: String) async throws {
+    /// Ticks a line off; it stays done on the computer until cleared there.
+    func completeTodo(_ id: String) async throws {
         let escaped = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
-        _ = try await send("DELETE", "/v1/todos/\(escaped)")
+        _ = try await send("POST", "/v1/todos/\(escaped)/done")
     }
 
     // MARK: - Plumbing
@@ -156,6 +161,7 @@ struct BangsClient {
         switch http.statusCode {
         case 200..<300: return data
         case 401: throw ClientError.unauthorized(message)
+        case 409: throw ClientError.full
         case 429: throw ClientError.tooSoon
         default: throw ClientError.server(message)
         }

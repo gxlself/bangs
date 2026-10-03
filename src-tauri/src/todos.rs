@@ -204,6 +204,23 @@ pub fn todo_toggle(app: AppHandle, id: String) {
     });
 }
 
+/// Ticks a line off and leaves it ticked: the watch's tap, which may arrive
+/// after the line was already ticked somewhere else and must not bring it back.
+pub fn todo_done(app: &AppHandle, id: &str) {
+    let now = now_ms();
+    edit(app, Origin::Here, |todos| {
+        if let Some(todo) = todos.iter_mut().find(|todo| todo.id == id && !todo.done) {
+            todo.done = true;
+            todo.done_at = Some(now);
+        }
+    });
+}
+
+/// As many open lines as the list takes; `todo_add` turns down another.
+pub fn is_full(app: &AppHandle) -> bool {
+    app.state::<TodoHub>().current().iter().filter(|todo| !todo.done).count() >= MAX_TODOS
+}
+
 /// "Clear done": the lines that were done when it was asked and still are —
 /// not one ticked since, nor one unticked on the phone while it blew away.
 /// Returns the ids it took off.

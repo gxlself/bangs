@@ -19,7 +19,7 @@ struct NowPlayingView: View {
     }
 
     private func player(_ media: Media, position: Double?) -> some View {
-        VStack(spacing: 6) {
+        VStack(spacing: 4) {
             HStack(spacing: 8) {
                 artwork
                 VStack(alignment: .leading, spacing: 1) {
@@ -34,9 +34,10 @@ struct NowPlayingView: View {
                 Spacer(minLength: 0)
             }
 
+            // The room between the title and the controls, whatever the watch:
+            // the lyric shows as much of itself as fits there.
             lyric(store.lyric(at: position))
-
-            Spacer(minLength: 0)
+                .frame(maxHeight: .infinity)
 
             progress(media, position: position)
 
@@ -46,6 +47,11 @@ struct NowPlayingView: View {
                 control("forward.fill", action: "next")
             }
         }
+        // The controls go down into the rounded bottom of the screen, as in
+        // the system's own player, which leaves the lyric room for two lines;
+        // the offline note needs that strip when it shows.
+        .padding(.bottom, store.connection == .offline ? 0 : 4)
+        .ignoresSafeArea(.container, edges: store.connection == .offline ? [] : .bottom)
     }
 
     private var artwork: some View {
@@ -61,31 +67,44 @@ struct NowPlayingView: View {
                     .background(.white.opacity(0.12))
             }
         }
-        .frame(width: 40, height: 40)
+        .frame(width: 36, height: 36)
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
-    /// The line being sung, and its translation when there is one.
+    /// The line being sung, and its translation when there is one — as much
+    /// of that as fits above the controls: the line wrapped, the line on its
+    /// own, or nothing on a small watch with a long line.
     @ViewBuilder
     private func lyric(_ line: LyricLine?) -> some View {
         if let line, !line.text.isEmpty {
-            VStack(spacing: 1) {
-                Text(line.text)
-                    .font(.footnote.weight(.medium))
-                    .lineLimit(2)
-                if let translation = line.translation, !translation.isEmpty {
-                    Text(translation)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
+            let translation = line.translation.flatMap { $0.isEmpty ? nil : $0 }
+            ViewThatFits(in: .vertical) {
+                lyricLines(line.text, translation, lines: 2)
+                lyricLines(line.text, translation, lines: 1)
+                lyricLines(line.text, nil, lines: 1)
+                Color.clear.frame(height: 0)
             }
-            .multilineTextAlignment(.center)
-            .frame(maxWidth: .infinity)
             .id(line.at)
             .transition(.opacity)
             .animation(.easeInOut(duration: 0.25), value: line.at)
         }
+    }
+
+    private func lyricLines(_ text: String, _ translation: String?, lines: Int) -> some View {
+        VStack(spacing: 1) {
+            Text(text)
+                .font(.footnote.weight(.medium))
+                .lineLimit(lines)
+            if let translation {
+                Text(translation)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(lines)
+            }
+        }
+        .multilineTextAlignment(.center)
+        .frame(maxWidth: .infinity)
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     @ViewBuilder
@@ -111,7 +130,7 @@ struct NowPlayingView: View {
         } label: {
             Image(systemName: symbol)
                 .font(prominent ? .title3 : .body)
-                .frame(maxWidth: .infinity, minHeight: prominent ? 40 : 34)
+                .frame(maxWidth: .infinity, minHeight: prominent ? 36 : 32)
         }
         .buttonStyle(.bordered)
         .buttonBorderShape(.circle)

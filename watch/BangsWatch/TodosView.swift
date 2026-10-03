@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// The notch's to-do list. Tap a line when it is done; it is gone for good,
-/// as it is on the computer.
+/// The open lines of the notch's to-do list. Tap a line when it is done: it
+/// is ticked off on the computer, as if tapped there, and leaves the watch.
 struct TodosView: View {
     @EnvironmentObject private var store: WatchStore
     @State private var draft = ""
