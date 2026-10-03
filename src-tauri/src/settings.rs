@@ -30,6 +30,9 @@ pub struct Settings {
     /// webview does not know are ignored, and tabs missing here keep their
     /// default place after the ones that are listed.
     pub tab_order: Vec<String>,
+    /// Serve the watch API on the local network (watch.rs). Off until the
+    /// user turns it on, since it is the one port Bangs opens beyond loopback.
+    pub watch_enabled: bool,
 }
 
 impl Default for Settings {
@@ -48,6 +51,7 @@ impl Default for Settings {
             display: None,
             language: None,
             tab_order: Vec::new(),
+            watch_enabled: false,
         }
     }
 }
@@ -125,6 +129,12 @@ mod tests {
     fn old_settings_keep_the_default_tab_order() {
         let settings: Settings = serde_json::from_str(r#"{"lyricsEnabled":true}"#).unwrap();
         assert!(settings.tab_order.is_empty());
+    }
+
+    #[test]
+    fn old_settings_keep_the_watch_off() {
+        let settings: Settings = serde_json::from_str(r#"{"lyricsEnabled":true}"#).unwrap();
+        assert!(!settings.watch_enabled);
     }
 
     #[test]

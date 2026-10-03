@@ -29,6 +29,10 @@ wants "Run anyway" once.
   at most a link — by writing a JSON file, or by posting to a loopback endpoint. The newest row
   shows beside the collapsed notch. See [docs/plugins.md](docs/plugins.md).
 
+- **Apple Watch**: the track with its lyrics and transport, Claude/Codex session status and the
+  to-do list on your wrist, over the local network. Off until the tray's 手表 / Watch submenu turns
+  it on; see [watch/README.md](watch/README.md).
+
 Screens with a hardware notch get wings around it; other screens get a virtual notch, which shrinks
 to a thin bar when nothing is happening (the tray menu can turn that off). Full-screen video, games
 and presentations get the screen to themselves: the notch collapses to that bar on macOS and hides

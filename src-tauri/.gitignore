@@ -8,3 +8,6 @@
 
 # Built by build.rs from native/macos
 /resources/
+
+# The Developer ID provisioning profile with iCloud; see watch/README.md.
+/embedded.provisionprofile

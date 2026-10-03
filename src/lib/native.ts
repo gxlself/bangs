@@ -25,6 +25,8 @@ export interface Settings {
   language: string | null;
   /** Tab ids in the order the user dragged them into; empty keeps the default. */
   tabOrder: string[];
+  /** Serve the watch API on the local network. */
+  watchEnabled: boolean;
 }
 
 export interface MediaState {

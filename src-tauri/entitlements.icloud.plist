@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- entitlements.plist plus iCloud, for builds that embed the Developer ID
+       provisioning profile (tauri.icloud.conf.json). iCloud is a restricted
+       entitlement: signing with it but without that profile gives an app
+       macOS refuses to launch, which is why the plain build does not use it. -->
+  <key>com.apple.security.automation.apple-events</key>
+  <true/>
+  <key>com.apple.application-identifier</key>
+  <string>W8L8ZJ3N2P.com.gxlself.bangs</string>
+  <key>com.apple.developer.team-identifier</key>
+  <string>W8L8ZJ3N2P</string>
+  <!-- The watch finds this Mac in the private database of this container. -->
+  <key>com.apple.developer.icloud-container-identifiers</key>
+  <array>
+    <string>iCloud.com.gxlself.bangs</string>
+  </array>
+  <key>com.apple.developer.icloud-services</key>
+  <array>
+    <string>CloudKit</string>
+  </array>
+  <key>com.apple.developer.icloud-container-environment</key>
+  <string>Production</string>
+</dict>
+</plist>
