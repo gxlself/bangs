@@ -1,0 +1,56 @@
+# Builds the watch app and checks the Mac side of the watch API, so a change
+# to either shows whether it still compiles before anyone opens Xcode.
+name: Watch
+
+on:
+  pull_request:
+    paths:
+      - "watch/**"
+      - "src-tauri/**"
+      - "src/**"
+      - ".github/workflows/watch.yml"
+  push:
+    branches: [main]
+    paths:
+      - "watch/**"
+      - "src-tauri/**"
+      - ".github/workflows/watch.yml"
+  workflow_dispatch:
+
+jobs:
+  watch-app:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build for the watchOS simulator
+        run: |
+          xcodebuild -version
+          xcodebuild build \
+            -project watch/BangsWatch.xcodeproj \
+            -scheme BangsWatch \
+            -destination 'generic/platform=watchOS Simulator' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO
+
+  mac-side:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Build the webview
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Rust tests
+        working-directory: src-tauri
+        run: cargo test
