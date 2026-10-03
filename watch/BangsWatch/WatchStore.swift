@@ -11,12 +11,26 @@ final class WatchStore: ObservableObject {
         case offline(String)
     }
 
+    enum CloudSearch: Equatable {
+        case idle
+        case searching
+        case done
+        case failed(String)
+    }
+
     @Published private(set) var pairing: Pairing?
     @Published private(set) var state: WatchState?
     @Published private(set) var connection: Connection = .idle
     @Published private(set) var artwork: UIImage?
     /// Milliseconds to add to this watch's clock to get the Mac's.
     @Published private(set) var clockOffset: Double = 0
+    /// Macs on this Apple ID that offer themselves in iCloud.
+    @Published private(set) var cloudMacs: [MacRecord] = []
+    @Published private(set) var cloudSearch: CloudSearch = .idle
+
+    /// Connect by itself when iCloud finds exactly one Mac. Off once the user
+    /// unpaired on purpose, so the pairing screen does not snap straight back.
+    private var autoConnect = true
 
     private var loop: Task<Void, Never>?
     private var artworkId: String?
@@ -36,8 +50,60 @@ final class WatchStore: ObservableObject {
     // MARK: Pairing
 
     func pair(address: String, code: String) async throws {
-        let pairing = try await BangsClient.pair(address: address, code: code)
-        UserDefaults.standard.set(try JSONEncoder().encode(pairing), forKey: Self.pairingKey)
+        save(try await BangsClient.pair(address: address, code: code))
+    }
+
+    /// Looks for Macs on this Apple ID, and connects to the only one there is.
+    func searchICloud() async {
+        cloudSearch = .searching
+        do {
+            cloudMacs = try await ICloudDirectory.macs()
+            cloudSearch = .done
+        } catch {
+            cloudSearch = .failed(error.localizedDescription)
+            return
+        }
+        if autoConnect, pairing == nil, cloudMacs.count == 1 {
+            try? await connect(cloudMacs[0])
+        }
+    }
+
+    /// Pairs with a Mac found in iCloud: no code, its record carries a token.
+    func connect(_ mac: MacRecord) async throws {
+        guard let reachable = await firstReachable(mac) else {
+            throw BangsError.unreachable(host: mac.host)
+        }
+        save(reachable)
+    }
+
+    /// The first of the Mac's addresses that answers.
+    private func firstReachable(_ mac: MacRecord) async -> Pairing? {
+        for candidate in mac.pairings {
+            if (try? await BangsClient(pairing: candidate).state(since: nil, timeout: 4)) != nil {
+                return candidate
+            }
+        }
+        return nil
+    }
+
+    /// When a Mac paired through iCloud stops answering, its record may say
+    /// why: a new address from DHCP, or a new token after "取消所有手表配对".
+    /// Returns whether it found a pairing that works.
+    private func refreshFromICloud() async -> Bool {
+        guard let id = pairing?.macID,
+              let mac = (try? await ICloudDirectory.macs())?.first(where: { $0.id == id }),
+              let reachable = await firstReachable(mac)
+        else { return false }
+        if reachable != pairing {
+            save(reachable)
+        }
+        return true
+    }
+
+    private func save(_ pairing: Pairing) {
+        if let data = try? JSONEncoder().encode(pairing) {
+            UserDefaults.standard.set(data, forKey: Self.pairingKey)
+        }
         self.pairing = pairing
         start()
     }
@@ -52,8 +118,11 @@ final class WatchStore: ObservableObject {
         artwork = nil
         artworkId = nil
         connection = .idle
-        if tellMac, let client {
-            Task { try? await client.unpair() }
+        if tellMac {
+            autoConnect = false
+            if let client {
+                Task { try? await client.unpair() }
+            }
         }
     }
 
@@ -62,10 +131,10 @@ final class WatchStore: ObservableObject {
     /// Starts long polling, unless it is already running. Called whenever the
     /// app comes to the front.
     func start() {
-        guard loop == nil, let client else { return }
+        guard loop == nil, pairing != nil else { return }
         connection = .connecting
         loop = Task { [weak self] in
-            await self?.run(client)
+            await self?.run()
         }
     }
 
@@ -76,16 +145,23 @@ final class WatchStore: ObservableObject {
         loop = nil
     }
 
-    private func run(_ client: BangsClient) async {
+    private func run() async {
         // No `since` on the first request, so it answers at once.
         var since: String?
-        while !Task.isCancelled {
+        var failures = 0
+        // Read the client every time round: iCloud may have moved the pairing.
+        while !Task.isCancelled, let client {
             do {
                 let next = try await client.state(since: since)
                 since = next.rev
+                failures = 0
                 apply(next)
                 connection = .online
             } catch BangsError.unauthorized {
+                if await refreshFromICloud() {
+                    since = nil
+                    continue
+                }
                 forget(tellMac: false)
                 return
             } catch {
@@ -94,6 +170,10 @@ final class WatchStore: ObservableObject {
                 }
                 connection = .offline(error.localizedDescription)
                 since = nil
+                failures += 1
+                if failures % 10 == 2, await refreshFromICloud() {
+                    continue
+                }
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
             }
         }

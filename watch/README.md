@@ -28,9 +28,49 @@ watchOS 10 or later.
 3. On the watch, enter the address (`127.0.0.1` works from the simulator) and
    the code, then **配对**.
 
-On a real watch, pick your team under *Signing & Capabilities* first, enter
-the Mac's LAN address from the tray, and keep the watch, or the iPhone it is
-paired with, on the same Wi-Fi as the Mac.
+The project signs with team `W8L8ZJ3N2P`. On a real watch, keep the watch,
+or the iPhone it is paired with, on the same Wi-Fi as the Mac. Finding the
+Mac through iCloud needs the setup below and the watch signed in to the same
+Apple ID; a real watch is the easy way to try it, since a watch simulator
+only has iCloud through a signed-in iPhone simulator.
+
+## Same Apple ID, no code
+
+A Mac build that carries the iCloud entitlement writes its address and a
+token into the private CloudKit database of the Apple ID it is signed in to
+(container `iCloud.com.gxlself.bangs`, zone `BangsWatch`, one `BangsMac`
+record per Mac with an encrypted `payload`). The watch's pairing screen
+reads it and connects on its own when it finds exactly one Mac, or lists them
+when there are several. When a Mac paired this way stops answering, the watch
+looks again, so a new DHCP address or a new token is picked up by itself.
+The pairing code stays for a Mac on another Apple ID, Windows, or a build
+without iCloud (`pnpm tauri dev` is one: it is not signed).
+
+One-time setup, all for team `W8L8ZJ3N2P`:
+
+1. **Container**: developer.apple.com → Certificates, IDs & Profiles →
+   Identifiers → iCloud Containers → add `iCloud.com.gxlself.bangs`.
+2. **App IDs**: enable iCloud with CloudKit on `com.gxlself.bangs` (macOS)
+   and pick that container. Xcode's automatic signing does the same for
+   `com.gxlself.bangs.watchkitapp` the first time the watch app runs on a
+   device; if it does not, enable it there too.
+3. **Profile**: Profiles → add a *Developer ID* profile for
+   `com.gxlself.bangs` with your Developer ID Application certificate, and
+   save it as `src-tauri/embedded.provisionprofile` (ignored by git).
+4. **Schema**: CloudKit Console → `iCloud.com.gxlself.bangs` → Development →
+   Schema → Record Types → add `BangsMac` with one field `payload` of type
+   *Encrypted String*, then **Deploy Schema Changes** to Production. Both
+   apps use the Production environment, which never creates types by itself.
+5. **Build**: `scripts/build-release.sh --mac` picks the profile up when it is
+   there; by hand it is
+   `APPLE_SIGNING_IDENTITY=… pnpm tauri build --config src-tauri/tauri.icloud.conf.json`.
+   Without the profile the iCloud entitlement must stay out (macOS refuses to
+   launch an app that claims it unprovisioned), which is why the plain build
+   does not use `entitlements.icloud.plist`.
+
+Then turn on **允许手表连接** on the Mac; the tray adds a line saying watches on
+this Apple ID connect on their own. Publishing errors show in Console.app
+under `[watch] iCloud`.
 
 ## How it talks to the Mac
 

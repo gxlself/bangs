@@ -7,6 +7,9 @@ struct Pairing: Codable, Equatable {
     var token: String
     /// The Mac's name, as it said when pairing.
     var host: String
+    /// Set when the pairing came from iCloud: names the Mac's record, so a new
+    /// address or token can be picked up from there.
+    var macID: String?
 }
 
 enum BangsError: LocalizedError {
@@ -14,6 +17,8 @@ enum BangsError: LocalizedError {
     /// The Mac no longer knows this watch's token.
     case unauthorized
     case server(status: Int, message: String)
+    /// None of the addresses a Mac put in iCloud answered.
+    case unreachable(host: String)
 
     var errorDescription: String? {
         switch self {
@@ -21,6 +26,8 @@ enum BangsError: LocalizedError {
             return "地址看不懂，填 Mac 的 IP，比如 192.168.1.8"
         case .unauthorized:
             return "Mac 已经取消了这块手表的配对"
+        case .unreachable(let host):
+            return "连不上 \(host)，手表和 Mac 要在同一个 Wi‑Fi 下"
         case .server(let status, let message):
             if status == 403 && message.contains("too many") {
                 return "错太多次了，托盘里已经换了新的配对码"
@@ -91,9 +98,9 @@ struct BangsClient {
 
     /// Everything on the watch's screens. With `since`, the Mac holds the
     /// request until something changes (or about 20 seconds pass).
-    func state(since rev: String?) async throws -> WatchState {
+    func state(since rev: String?, timeout: TimeInterval = 30) async throws -> WatchState {
         let query = rev.map { [URLQueryItem(name: "since", value: $0)] } ?? []
-        let request = makeRequest("watch/state", query: query, timeout: 30)
+        let request = makeRequest("watch/state", query: query, timeout: timeout)
         return try JSONDecoder().decode(WatchState.self, from: try await Self.send(request))
     }
 

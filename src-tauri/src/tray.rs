@@ -108,6 +108,15 @@ fn watch_menu(app: &AppHandle, enabled: bool) -> tauri::Result<Submenu<Wry>> {
     menu.append(&PredefinedMenuItem::separator(app)?)?;
     menu.append(&MenuItem::with_id(app, "watch-address", address, false, None::<&str>)?)?;
     menu.append(&MenuItem::with_id(app, "watch-code", code, false, None::<&str>)?)?;
+    if hub.icloud_ready() {
+        menu.append(&MenuItem::with_id(
+            app,
+            "watch-icloud",
+            t("同一 Apple 账号的手表自动连接", "Watches on this Apple ID connect on their own"),
+            false,
+            None::<&str>,
+        )?)?;
+    }
     menu.append(&MenuItem::with_id(app, "watch-new-code", t("换一个配对码", "New pairing code"), true, None::<&str>)?)?;
     menu.append(&MenuItem::with_id(
         app,
@@ -197,7 +206,7 @@ fn handle_menu(app: &AppHandle, id: &str) {
         }
         "watch-new-code" => app.state::<WatchHub>().renew_code(),
         "watch-unpair" => watch::unpair_all(app),
-        "watch-address" | "watch-code" => {}
+        "watch-address" | "watch-code" | "watch-icloud" => {}
         "idle-handle" => {
             settings::update(app, |settings| settings.idle_handle = !settings.idle_handle);
         }

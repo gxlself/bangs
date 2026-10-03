@@ -56,7 +56,15 @@ if [[ $want_mac -eq 1 ]]; then
     notary=""
   fi
   # `pnpm build` empties dist/, which is where $out lives, so it is made after.
-  APPLE_SIGNING_IDENTITY="$identity" pnpm tauri build --bundles app,dmg
+  # With the iCloud provisioning profile in place, the build carries the
+  # iCloud entitlement and watches on the same Apple ID pair on their own
+  # (watch/README.md). Without it the build is the same as ever.
+  icloud=()
+  if [[ -f "$root/src-tauri/embedded.provisionprofile" ]]; then
+    echo "带上 iCloud 描述文件，同一 Apple 账号的手表可以免配对码"
+    icloud=(--config "$root/src-tauri/tauri.icloud.conf.json")
+  fi
+  APPLE_SIGNING_IDENTITY="$identity" pnpm tauri build --bundles app,dmg ${icloud[@]+"${icloud[@]}"}
   bundle="$root/src-tauri/target/release/bundle"
   # Tauri's own name for the architecture; older bundles of other versions stay
   # in that directory, so the file is named, never globbed.

@@ -11,6 +11,12 @@
 //! lines, coding sessions by project name, the to-do list — and can only do
 //! what those screens do: play, pause and skip, add and tick off a to-do.
 //! Never the clipboard, the shelf, file paths or the board.
+//!
+//! A watch signed in to the same Apple ID as this Mac does not need the code:
+//! a build that carries the iCloud entitlement also writes the address and a
+//! token of its own into the user's private CloudKit database (see
+//! `native/macos/icloud_bridge.m` and watch/README.md), where the watch finds
+//! it. The code stays for everything else — Windows, or iCloud turned off.
 
 use std::collections::hash_map::{DefaultHasher, RandomState};
 use std::fs;
@@ -50,6 +56,13 @@ const IDLE_STEP: Duration = Duration::from_millis(100);
 /// A song has a few hundred lines at most; this only stops a broken source.
 const MAX_LYRICS: usize = 400;
 const MAX_SESSIONS: usize = 12;
+/// The CloudKit container both the Mac and the watch app are entitled to.
+#[cfg(target_os = "macos")]
+const ICLOUD_CONTAINER: &str = "iCloud.com.gxlself.bangs";
+/// How often the iCloud record is compared with what it should say; it is
+/// only written when that changed (a new address, a new token).
+#[cfg(target_os = "macos")]
+const ICLOUD_STEP: Duration = Duration::from_secs(5);
 
 // MARK: - What the watch sees
 
@@ -191,6 +204,11 @@ pub struct WatchHub {
     enabled: AtomicBool,
     pairing: Mutex<Pairing>,
     tokens: Mutex<Vec<String>>,
+    /// The token published to iCloud, kept apart from paired watches': every
+    /// watch on the Apple ID shares it, and it is not counted or trimmed.
+    icloud_token: Mutex<Option<String>>,
+    /// This build can write to iCloud, so same-account watches pair on their own.
+    icloud_ready: AtomicBool,
 }
 
 struct Pairing {
@@ -204,6 +222,8 @@ impl Default for WatchHub {
             enabled: AtomicBool::new(false),
             pairing: Mutex::new(Pairing { code: new_code(), failures: 0 }),
             tokens: Mutex::new(Vec::new()),
+            icloud_token: Mutex::new(None),
+            icloud_ready: AtomicBool::new(false),
         }
     }
 }
@@ -219,6 +239,10 @@ impl WatchHub {
 
     pub fn paired(&self) -> usize {
         self.tokens.lock().unwrap().len()
+    }
+
+    pub fn icloud_ready(&self) -> bool {
+        self.icloud_ready.load(Ordering::Relaxed)
     }
 
     /// Draws a code nobody has seen yet.
@@ -250,6 +274,9 @@ impl WatchHub {
 
     fn authorized(&self, request: &Request) -> Option<String> {
         let token = request.authorization.as_deref()?.strip_prefix("Bearer ")?.trim();
+        if self.icloud_token.lock().unwrap().as_deref().is_some_and(|known| same(known, token)) {
+            return Some(token.to_string());
+        }
         self.tokens.lock().unwrap().iter().find(|known| same(known, token)).cloned()
     }
 }
@@ -285,6 +312,10 @@ fn tokens_path(app: &AppHandle) -> Option<PathBuf> {
     Some(app.path().app_config_dir().ok()?.join("watch-tokens.json"))
 }
 
+fn icloud_token_path(app: &AppHandle) -> Option<PathBuf> {
+    Some(app.path().app_config_dir().ok()?.join("watch-icloud-token"))
+}
+
 fn save_tokens(app: &AppHandle) {
     let Some(path) = tokens_path(app) else { return };
     let tokens = app.state::<WatchHub>().tokens.lock().unwrap().clone();
@@ -307,8 +338,33 @@ fn save_tokens(app: &AppHandle) {
 pub fn unpair_all(app: &AppHandle) {
     let hub = app.state::<WatchHub>();
     hub.tokens.lock().unwrap().clear();
+    // Same-account watches lose their token too; the next iCloud record
+    // carries a new one, so they come back on their own.
+    *hub.icloud_token.lock().unwrap() = None;
+    if let Some(path) = icloud_token_path(app) {
+        let _ = fs::remove_file(path);
+    }
     hub.renew_code();
     save_tokens(app);
+}
+
+/// The token for same-account watches, made the first time it is needed.
+#[cfg(target_os = "macos")]
+fn icloud_token(app: &AppHandle) -> String {
+    let hub = app.state::<WatchHub>();
+    let mut token = hub.icloud_token.lock().unwrap();
+    if let Some(existing) = token.as_ref() {
+        return existing.clone();
+    }
+    let fresh = random_hex(4);
+    if let Some(path) = icloud_token_path(app) {
+        if fs::write(&path, &fresh).is_ok() {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+        }
+    }
+    *token = Some(fresh.clone());
+    fresh
 }
 
 /// Flips the switch the listener watches. The setting itself is saved by the
@@ -346,8 +402,17 @@ pub fn start(app: AppHandle) {
     {
         *app.state::<WatchHub>().tokens.lock().unwrap() = tokens;
     }
+    if let Some(token) = icloud_token_path(&app)
+        .and_then(|path| fs::read_to_string(path).ok())
+        .map(|raw| raw.trim().to_string())
+        .filter(|token| !token.is_empty())
+    {
+        *app.state::<WatchHub>().icloud_token.lock().unwrap() = Some(token);
+    }
     let enabled = app.state::<SettingsState>().get().watch_enabled;
     app.state::<WatchHub>().enabled.store(enabled, Ordering::Relaxed);
+    #[cfg(target_os = "macos")]
+    icloud::start(app.clone());
 
     // One thread for the life of the app: it holds the port while the switch
     // is on and lets go of it as soon as the switch is off.
@@ -497,6 +562,94 @@ fn handle(app: &AppHandle, host: &str, mut stream: TcpStream) {
             reply(&mut stream, "200 OK", r#"{"ok":true}"#);
         }
         _ => reply(&mut stream, "404 Not Found", r#"{"error":"not a watch route"}"#),
+    }
+}
+
+// MARK: - iCloud
+
+#[cfg(target_os = "macos")]
+mod icloud {
+    use std::ffi::{c_char, c_int, CString};
+    use std::fs;
+    use std::sync::atomic::Ordering;
+    use std::thread;
+
+    use serde::Serialize;
+    use tauri::{AppHandle, Manager};
+
+    use super::{host_name, icloud_token, lan_address, random_hex, WatchHub, ICLOUD_CONTAINER, ICLOUD_STEP, PORT};
+
+    extern "C" {
+        fn bangs_icloud_available(container: *const c_char) -> c_int;
+        fn bangs_icloud_publish(container: *const c_char, record_name: *const c_char, payload: *const c_char);
+        fn bangs_icloud_remove(container: *const c_char, record_name: *const c_char);
+    }
+
+    /// What the watch reads from the record (`MacRecord` in the watch app).
+    #[derive(Serialize)]
+    struct Payload<'a> {
+        id: &'a str,
+        host: &'a str,
+        /// Tried in order: the LAN address, then the Bonjour name.
+        addresses: Vec<String>,
+        port: u16,
+        token: &'a str,
+    }
+
+    /// Names this Mac's record, the same across launches.
+    fn mac_id(app: &AppHandle) -> String {
+        let path = app.path().app_config_dir().ok().map(|dir| dir.join("watch-mac-id"));
+        if let Some(existing) = path
+            .as_ref()
+            .and_then(|path| fs::read_to_string(path).ok())
+            .map(|raw| raw.trim().to_string())
+            .filter(|id| !id.is_empty())
+        {
+            return existing;
+        }
+        let id = format!("mac-{}", random_hex(2));
+        if let Some(path) = path {
+            let _ = fs::write(path, &id);
+        }
+        id
+    }
+
+    pub fn start(app: AppHandle) {
+        let container = CString::new(ICLOUD_CONTAINER).unwrap();
+        // SAFETY: a valid C string that outlives the call.
+        if unsafe { bangs_icloud_available(container.as_ptr()) } == 0 {
+            eprintln!("[watch] no iCloud entitlement in this build; watches pair with the code");
+            return;
+        }
+        app.state::<WatchHub>().icloud_ready.store(true, Ordering::Relaxed);
+        thread::spawn(move || {
+            let id = mac_id(&app);
+            let record = CString::new(id.clone()).unwrap();
+            let host = host_name();
+            let bonjour = if host.ends_with(".local") { host.clone() } else { format!("{host}.local") };
+            let mut published: Option<String> = None;
+            loop {
+                if app.state::<WatchHub>().enabled() {
+                    let token = icloud_token(&app);
+                    let mut addresses: Vec<String> = lan_address().map(|ip| ip.to_string()).into_iter().collect();
+                    addresses.push(bonjour.clone());
+                    let payload = Payload { id: &id, host: &host, addresses, port: PORT, token: &token };
+                    let text = serde_json::to_string(&payload).unwrap_or_default();
+                    if published.as_deref() != Some(text.as_str()) {
+                        if let Ok(c_text) = CString::new(text.clone()) {
+                            // SAFETY: valid C strings that outlive the call; the
+                            // bridge copies them before returning.
+                            unsafe { bangs_icloud_publish(container.as_ptr(), record.as_ptr(), c_text.as_ptr()) };
+                        }
+                        published = Some(text);
+                    }
+                } else if published.take().is_some() {
+                    // SAFETY: as above.
+                    unsafe { bangs_icloud_remove(container.as_ptr(), record.as_ptr()) };
+                }
+                thread::sleep(ICLOUD_STEP);
+            }
+        });
     }
 }
 
